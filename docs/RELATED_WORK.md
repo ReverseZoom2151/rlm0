@@ -115,7 +115,8 @@ REPL variable is one instance of the third clause.
 Generalises RLM in its own first sentence, recursing over full agent harnesses
 with filesystem and planning rather than bare model calls. Oolong-Synthetic at
 4M tokens: 81.36 on GPT-5 against a 71.75 baseline, 89.77 on Claude Sonnet 4.5.
-Reports no depth limit and no cost analysis, which is the gap rlm0 sits in.
+Its configurable default depth is three. The paper does not provide the
+cost-matched ablation needed to establish the cost of that recursion.
 
 **Anthropic Dynamic Workflows**, around late May 2026. **[S]** The deployed
 version: the model writes an orchestration script, up to 1,000 subagents with
@@ -180,6 +181,38 @@ counter is generality: a combinator library has a coverage gap and a REPL does
 not, and rlm0 bounds cost at runtime instead of restricting what can be
 written. Whether that trade is worth it is an open question and should be
 stated as one.
+
+## Implementations that set the engineering baseline
+
+**zigrlm.** The local `zigrlm-main` implementation uses parallel child work,
+deterministic ordering, network-closed container execution, and secret
+redaction. It is direct prior art for host callbacks over a local transport and
+for deterministic trace ordering. rlm0 should not claim either as novel. Its
+different question is whether a run should always retain a no-recursion control
+and one budget record.
+
+**RLM_agent.** The local `RLM_agent-main` implementation provides durable agent
+state, context handles, repeated-call detection, parent-budget accounting, and
+batched work. It is prior art for much of rlm0's state and accounting surface.
+Its approach is a stateful local-agent system, not a paired evaluation runtime.
+
+**TimeRLM.** *Recursive Language Models Enable Precise Anomaly Localization in
+Long-Context Time-Series.* **[V]** TimeRLM keeps numerical signals in a
+persistent environment and grades structured evidence, not only a task answer.
+Its AnomalyXL benchmark requires exact anomaly location, type, magnitude, and
+lead-lag evidence across long signals. Its published configuration implemented
+sub-model support but left it disabled, so the result supports bounded
+environmental reasoning and evidence-aware evaluation more directly than a
+general recursion claim. The permissive final-answer recovery in its harness is
+also a reason for rlm0 to move toward a strict, versioned completion protocol.
+
+**Chained Recursive Language Models.** See the extension section below. It is
+the relevant prior art for using fresh roots, a compact blackboard, artifacts,
+and handoffs across stages. This is not part of rlm0's default policy.
+
+**RLMOpt.** See the extension section below. It is useful prior art for prompt
+optimization with deterministic guards, Pareto selection, and regression
+checks. It is not a substitute for a runtime-level evaluation protocol.
 
 ## Where this project's contributions were already taken
 
@@ -255,9 +288,9 @@ one request, wait for the first token, then fire the rest.
 This is a hard ceiling on fan-out caching and it inverts the naive design. A
 cold fan-out of N children pays N prefix writes at 1.25x base input, which is
 worse than not caching at all. A barrier before dispatch is therefore a
-correctness fix for the cost model, not an optimisation. Sub-calls here are
-currently sequential, so this does not bite yet, and the constraint is recorded
-so that adding parallel fan-out does not silently make cost worse.
+correctness fix for the cost model, not an optimisation. `rlm_batch` implements
+that barrier now; live-provider measurements remain necessary before making a
+cache-savings claim.
 
 Also from the same source: minimum cacheable length is model-dependent rather
 than a flat 1024, and below it no cache is created and no error is returned, so
@@ -339,19 +372,20 @@ testing deterministic layers behind their own assertions rather than end to end
 through a stochastic stack. The sandbox, budget and parsing layers here are
 tested that way, with no model in the loop.
 
-## Newest, and not yet digested
+## Extensions and task-specific RLM work
 
 **Chained Recursive Language Models.** Mitra, Ulukus. Maryland.
 [arXiv:2608.05124](https://arxiv.org/abs/2608.05124), 5 Aug 2026. **[V]**
-Repeated fresh reasoning roots carrying a compact summary and a blackboard
-instead of full history, explicitly studying when continuation beats direct
-answering. The closest work on when escalation is worth it, and twelve days
-old. The abstract reports no headline numbers.
+Repeated fresh reasoning roots carrying a compact summary, blackboard, and
+artifacts instead of full history. This is prior art for fresh-root handoffs,
+not for rlm0's depth-zero paired control. The paper does not provide enough
+cost-matched detail to support a general serving claim.
 
 **RLMOpt.** Satheesha, Pande, Duddempudi, Dandala.
 [arXiv:2608.10471](https://arxiv.org/abs/2608.10471), 11 Aug 2026. **[V]**
-RLM as the controller for prompt optimisation, deciding what to explore and
-when to stop. Beats GEPA on four benchmarks.
+RLM as the controller for prompt optimisation, with deterministic execution,
+Pareto selection, and regression/significance guards. It is adjacent evaluation
+and development work, not an inference-runtime replacement.
 
 **PEEK.** Gu, Zhang, **Khattab**, Madden.
 [arXiv:2605.19932](https://arxiv.org/abs/2605.19932), May 2026. **[V]** A
