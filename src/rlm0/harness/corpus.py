@@ -27,14 +27,26 @@ Finally, the generator re-derives every answer from the text it just emitted,
 the way a solver would, and refuses to hand back a corpus whose ground truth
 disagrees. Most synthetic benchmarks trust the variable they built the text
 from, which means a rendering bug becomes a silently wrong label.
+
+Perturbation is the same argument applied to contamination. A benchmark that
+tests recall of a memorised instance stops measuring anything the moment the
+instance leaks, and arXiv:2605.19999 argues the fix is to apply the structure
+to perturbed inputs rather than to a fixed one. This generator owns its
+corpus, so it can emit a perturbed twin of every sample whose entities, values
+and dates are all different and whose task structure is identical, and then
+re-derive the twin's answer from the twin's own text before letting it out. A
+system that scores well on the originals and badly on the twins has been
+recognised rather than reading, and the report says so rather than averaging
+the two together.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from random import Random
 from typing import Any
@@ -44,11 +56,13 @@ __all__ = [
     "CorpusSpec",
     "Document",
     "GroundTruthError",
+    "Perturbation",
     "Regime",
     "Sample",
     "SolverTask",
     "TaskFamily",
     "generate_corpus",
+    "perturb_sample",
     "verify_sample",
 ]
 
@@ -163,6 +177,19 @@ class Sample:
     required_doc_ids: frozenset[str]
     distractor_answers: tuple[str, ...] = ()
 
+    origin_sample_id: str | None = None
+    """Set on a perturbed twin, naming the sample it was rewritten from.
+
+    Carried so that original and perturbed can be paired at scoring time. An
+    accuracy gap between the two halves only means memorisation if the two
+    halves are the same tasks, and the pairing is the only thing that makes
+    that checkable.
+    """
+
+    @property
+    def perturbed(self) -> bool:
+        return self.origin_sample_id is not None
+
     @property
     def regime(self) -> Regime:
         return self.family.regime
@@ -190,6 +217,7 @@ class Sample:
             "answer": self.answer,
             "required_doc_ids": sorted(self.required_doc_ids),
             "distractor_answers": list(self.distractor_answers),
+            "origin_sample_id": self.origin_sample_id,
         }
 
 
@@ -213,6 +241,15 @@ class CorpusSpec:
     chain_length: int = 4
     cohort_size: int = 12
     hops: int = 3
+
+    perturbation_seed: int | None = None
+    """When set, every sample is emitted twice: original, then perturbed twin.
+
+    Part of the spec rather than a generation argument because it changes what
+    the corpus is, and the spec is what the corpus identity is hashed from. A
+    result measured on the paired corpus must never be comparable to one
+    measured on the unpaired corpus by accident.
+    """
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.distractor_similarity <= 1.0:
@@ -300,6 +337,15 @@ _ROUTE_RE = re.compile(r"^Node (\S+) routes to node (\S+)\.$")
 _COHORT_RE = re.compile(r"^cohort: (\S+)$")
 
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+_EPOCH = dt.date(2020, 1, 1)
+_DATE_SPAN_DAYS = 2200
+_DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+
+_ID_RE = re.compile(
+    rf"(?<![0-9A-Za-z-])([A-Z]{{3,4}})-([{_ALPHABET}]{{4,10}})(?![0-9A-Za-z-])"
+)
+_BARE_INT_RE = re.compile(r"(?<![0-9A-Za-z_-])\d+(?![0-9A-Za-z_-])")
 
 
 class _Ids:
@@ -403,6 +449,20 @@ def _noise_lines(rng: Random, ids: _Ids, count: int) -> list[str]:
     return lines
 
 
+def _filed_line(rng: Random) -> str:
+    """A dated line on every document.
+
+    Dates are here to be perturbed. Nothing in any family's ground truth
+    depends on them, which is exactly what makes them a clean surface for
+    contamination resistance: shifting every date by the same offset changes
+    every date in the text and cannot change a single answer, so a system that
+    is only recognising the instance loses its grip while a system that is
+    reading loses nothing.
+    """
+    filed = _EPOCH + dt.timedelta(days=rng.randrange(_DATE_SPAN_DAYS))
+    return f"Filed on {filed.isoformat()} in intake batch {rng.randrange(10, 99)}."
+
+
 def _make_doc(
     ids: _Ids,
     rng: Random,
@@ -417,6 +477,7 @@ def _make_doc(
     of the document rewards reading the top of every document.
     """
     lines = _noise_lines(rng, ids, spec.filler_lines)
+    lines.insert(rng.randrange(len(lines) + 1), _filed_line(rng))
     for line in body:
         lines.insert(rng.randrange(len(lines) + 1), line)
     if cohort is not None:
@@ -946,17 +1007,215 @@ def verify_sample(sample: Sample) -> None:
         )
 
 
+_VALUE_ANSWER_FAMILIES = frozenset(
+    {TaskFamily.NEEDLE, TaskFamily.SUPERSESSION, TaskFamily.MULTI_HOP}
+)
+"""Families whose answer is one of the values in the text.
+
+The other two answer with a count and with a subject identifier, and applying
+the value transform to either would be wrong in a way the self-check would
+catch but that is better not written in the first place.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Perturbation:
+    """How to rewrite a sample so that only its structure survives.
+
+    Three transforms, each chosen because it is the strongest change that
+    provably cannot move the answer.
+
+    Entities are rewritten by a fixed permutation of the identifier alphabet
+    applied character by character. That is a rename, but it is a rename that
+    preserves the distance between identifiers, so the near-miss distractors
+    the corpus depends on stay exactly one character from the answer. Drawing
+    fresh random identifiers instead would rename everything and quietly
+    destroy the adversarial construction, leaving a perturbed half that is
+    easier than the original and an original-versus-perturbed gap that
+    measures difficulty rather than memorisation.
+
+    Values are multiplied by a positive integer. Multiplication is not an
+    arbitrary choice: the count family needs the ordering of every value
+    against a threshold preserved, and the argmax family needs the ordering of
+    sums preserved. A uniform additive shift preserves the first and breaks
+    the second, because a subject holding more records gains more. Scaling
+    preserves both, for every family at once, which is why it is the transform
+    used everywhere rather than a different one per family.
+
+    Dates shift by a single offset, so every date changes and every ordering
+    between dates holds. Nothing derives an answer from a date, so this is
+    free surface area: it changes the text a memorising system would recognise
+    without touching anything a reading system uses.
+
+    The twin is re-derived and re-verified from its own emitted text before it
+    is returned, so none of the above is trusted. It is checked.
+    """
+
+    seed: int
+    rename_entities: bool = True
+    scale_values: bool = True
+    shift_dates: bool = True
+
+    def __post_init__(self) -> None:
+        if not (self.rename_entities or self.scale_values or self.shift_dates):
+            raise ValueError(
+                "a perturbation with every transform disabled produces a twin "
+                "identical to the original, which would report a zero "
+                "contamination gap for a corpus that was never perturbed"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class _Rewrite:
+    """The concrete substitutions one Perturbation resolves to."""
+
+    letters: dict[str, str]
+    factor: int
+    day_shift: int
+    rename_entities: bool
+    scale_values: bool
+    shift_dates: bool
+
+    def text(self, value: str) -> str:
+        out = value
+        if self.rename_entities:
+            out = _ID_RE.sub(self._rename, out)
+        if self.scale_values:
+            out = _scale_values_in(out, self.factor)
+        if self.shift_dates:
+            out = _DATE_RE.sub(self._shift, out)
+        return out
+
+    def answer(self, value: str, family: TaskFamily) -> str:
+        if _ID_RE.fullmatch(value):
+            return self.text(value)
+        if (
+            self.scale_values
+            and family in _VALUE_ANSWER_FAMILIES
+            and value.isdigit()
+        ):
+            return str(int(value) * self.factor)
+        return value
+
+    def _rename(self, match: re.Match[str]) -> str:
+        token = "".join(self.letters[char] for char in match.group(2))
+        return f"{match.group(1)}-{token}"
+
+    def _shift(self, match: re.Match[str]) -> str:
+        original = dt.date(
+            int(match.group(1)), int(match.group(2)), int(match.group(3))
+        )
+        return (original + dt.timedelta(days=self.day_shift)).isoformat()
+
+
+def _scale_values_in(line: str, factor: int) -> str:
+    """Scale the bare integers on a line that states an attribute.
+
+    Gated on the line naming one of the attribute surface forms, which is what
+    keeps the transform off the noise lines, the cohort declarations, the
+    supersession edges, the routing edges and the dates. Those carry integers
+    too, and scaling a batch number or a cycle count would be harmless but
+    would also be a transform nobody could reason about.
+    """
+    if not any(attribute in line for attribute in _ATTRIBUTES):
+        return line
+    return _BARE_INT_RE.sub(lambda m: str(int(m.group()) * factor), line)
+
+
+def _rewrite_for(perturbation: Perturbation) -> _Rewrite:
+    rng = Random(
+        int(
+            hashlib.sha256(
+                f"perturb:{perturbation.seed}".encode()
+            ).hexdigest()[:16],
+            16,
+        )
+    )
+    shuffled = list(_ALPHABET)
+    while True:
+        rng.shuffle(shuffled)
+        if all(a != b for a, b in zip(_ALPHABET, shuffled, strict=True)):
+            # A derangement, so every character of every identifier moves.
+            # A permutation with fixed points would leave some identifiers
+            # partly intact, and partly intact is the state a contaminated
+            # model can still recognise.
+            break
+    return _Rewrite(
+        letters=dict(zip(_ALPHABET, shuffled, strict=True)),
+        factor=rng.choice((2, 3, 4, 6, 7, 9)),
+        day_shift=rng.choice((-1, 1)) * rng.randrange(400, 3000),
+        rename_entities=perturbation.rename_entities,
+        scale_values=perturbation.scale_values,
+        shift_dates=perturbation.shift_dates,
+    )
+
+
+def perturb_sample(sample: Sample, perturbation: Perturbation) -> Sample:
+    """Rewrite one sample, then re-derive its ground truth from the result.
+
+    The verification at the end is the whole reason this is safe to do. The
+    transforms above are argued to preserve every family's answer, but an
+    argument is not a check, and the check available here is the same one the
+    generator already runs: parse the emitted text with no generator state and
+    see whether it supports the label. A perturbation that broke an answer
+    raises GroundTruthError here rather than becoming a wrong label later.
+    """
+    if sample.perturbed:
+        raise ValueError(
+            f"{sample.sample_id} is already a perturbed twin; perturbing a "
+            "twin again would leave nothing paired to the original"
+        )
+    rewrite = _rewrite_for(perturbation)
+    documents = tuple(
+        Document(
+            doc_id=rewrite.text(doc.doc_id),
+            lines=tuple(rewrite.text(line) for line in doc.lines),
+        )
+        for doc in sample.documents
+    )
+    twin = replace(
+        sample,
+        sample_id=f"{sample.sample_id}~perturbed",
+        question=rewrite.text(sample.question),
+        documents=documents,
+        answer=rewrite.answer(sample.answer, sample.family),
+        required_doc_ids=frozenset(
+            rewrite.text(doc_id) for doc_id in sample.required_doc_ids
+        ),
+        distractor_answers=tuple(
+            rewrite.answer(value, sample.family)
+            for value in sample.distractor_answers
+        ),
+        origin_sample_id=sample.sample_id,
+    )
+    verify_sample(twin)
+    return twin
+
+
 def generate_corpus(spec: CorpusSpec) -> Corpus:
     """Generate and self-check a corpus.
 
     Deterministic in the spec alone: the same spec produces byte-identical
     output on any machine and any Python build, because every draw comes from
     a digest-derived seed rather than from anything the interpreter salts.
+
+    With `perturbation_seed` set, each sample is followed immediately by its
+    perturbed twin. Emitting them into one corpus rather than into two is
+    deliberate: the two halves are then graded under one policy, on one run,
+    against one corpus hash, so the original-versus-perturbed gap cannot pick
+    up a difference in anything else.
     """
+    perturbation = (
+        None
+        if spec.perturbation_seed is None
+        else Perturbation(seed=spec.perturbation_seed)
+    )
     samples: list[Sample] = []
     for family in TaskFamily:
         for index in range(spec.samples_per_family):
             sample = _BUILDERS[family](spec, index)
             verify_sample(sample)
             samples.append(sample)
+            if perturbation is not None:
+                samples.append(perturb_sample(sample, perturbation))
     return Corpus(spec=spec, samples=tuple(samples))
