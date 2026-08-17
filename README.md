@@ -124,10 +124,11 @@ used by each.
 | --- | --- |
 | `rlm0 run` | Answer one task over local files or directories |
 | `rlm0 eval` | Run the deterministic synthetic evaluation suite |
-| `rlm0 benchmark` | Run a pinned local OOLONG or RULER S-NIAH dataset |
+| `rlm0 benchmark` | Run a pinned local OOLONG, RULER S-NIAH, or AnomalyXL-style dataset |
 | `rlm0 cost` | Estimate the worst case permitted by a configuration |
 | `rlm0 sandbox` | Verify the requested execution backend |
 | `rlm0 doctor` | Inspect providers, benchmarks, and local prerequisites without spending |
+| `rlm0 research` | Validate and inspect local research records without rerunning providers |
 
 The CLI downloads no benchmark data. `rlm0 benchmark --list` prints the pinned
 source and revision expected by each adapter.
@@ -190,11 +191,13 @@ The complete protocol and negative-result policy are in
 layer for controlled research experiments. It does not alter the normal
 depth-0 then depth-1 runtime or make any public benchmark result.
 
-It provides immutable `ResearchRun` records, hash-chained JSONL replay logs,
-and a bounded content-addressed artifact store. On top of those contracts are
+It provides immutable `ResearchRun` records, hash-chained JSONL replay logs
+that seal once complete, and a bounded content-addressed artifact store. Every
+trial must match its control's task and budget identity. On top of those contracts are
 conservative context screening, PEEK-style maps, SRLM candidate search,
 verifier-backed recombination, fresh-root Chained RLM handoffs, declared
-bounded agent-harness plans, and split-safe prompt optimisation.
+bounded agent-harness plans, and split-safe prompt optimisation with
+pre-dispatch evaluation permits.
 
 The local `anomalyxl-local` adapter accepts a caller-supplied, hash-locked
 JSONL dataset for precise anomaly tasks. It is informed by TimeRLM and

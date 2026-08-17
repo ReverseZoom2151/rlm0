@@ -6,19 +6,21 @@ on:
 
 jobs:
   test:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest --disable-warnings --cov=rlm0 --cov-report=term-missing
+      - run: python -m pytest --disable-warnings --cov=rlm0 --cov-report=term-missing --cov-fail-under=84
       - run: ruff check .
       - run: mypy src tests
       - name: Build wheel and test its installed CLI
@@ -30,3 +32,6 @@ jobs:
           "$smoke_venv/bin/python" -m pip install "$wheel_dir"/*.whl
           "$smoke_venv/bin/rlm0" --version
           "$smoke_venv/bin/rlm0" benchmark --list
+          "$smoke_venv/bin/rlm0" research --help
+          "$smoke_venv/bin/rlm0" research replay --help
+          "$smoke_venv/bin/rlm0" doctor

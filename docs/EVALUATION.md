@@ -281,21 +281,25 @@ future work, not a capability claimed by this repository.
 
 Optional research strategies must preserve the same audit trail as an ordinary
 evaluation. `ResearchRun` requires a depth-zero control and records immutable
-trials and ordered stages with configuration and budget fingerprints. An
-append-only, hash-chained JSONL `EventLog` can persist that record; validation
-and replay reconstruct the submitted record without invoking a provider.
+trials and ordered stages with configuration and budget fingerprints. Every
+trial must bind to its control's task and budget identity. An append-only,
+hash-chained JSONL `EventLog` can persist that record; a terminal completion
+record seals it, and validation and replay reject events after that seal without
+invoking a provider.
 
 The optional screen, PEEK-style maps, SRLM candidate search, verifier
 recombination, Chained RLM handoffs, bounded agent-harness plans, and prompt
 optimisation APIs are local tools for controlled experiments. They do not make
 a public result, and their presence does not relax the table refusals above.
-Prompt optimisation pins disjoint train, validation, and test fingerprints and
-forbids test-set candidate selection. More detail is in [RESEARCH.md](RESEARCH.md).
+Prompt optimisation pins disjoint train, validation, and test fingerprints,
+forbids test-set candidate selection, and reserves estimated evaluation cost
+before evaluator dispatch. More detail is in [RESEARCH.md](RESEARCH.md).
 
 For task-shaped local anomaly experiments, `anomalyxl-local` accepts a
 caller-supplied hash-locked JSONL dataset and uses strict JSON predictions. It
 reports localization, classification-with-evidence, magnitude, multichannel,
-and lead-lag metrics. This is a clean-room local adapter informed by TimeRLM
+and lead-lag metrics; lead-lag labels require a positive length and valid lag.
+This is a clean-room local adapter informed by TimeRLM
 and AnomalyXL, not an official dataset adapter or a claim of scorer parity.
 
 ## Reporting a negative result

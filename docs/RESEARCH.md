@@ -14,14 +14,17 @@ leave external validation separate from implementation.
 `ResearchRun`, `ResearchTrial`, and `ResearchStage` are immutable records for
 multi-run experiments. A research record carries a depth-0 control, a declared
 budget, fingerprints for configuration and budget, and contiguous stage
-metadata. A strategy cannot use a flexible experiment structure to discard the
-baseline required by the main runtime.
+metadata. Every trial must name the same task as that control and use the same
+budget fingerprint. A strategy cannot use a flexible experiment structure to
+discard or weaken the baseline required by the main runtime.
 
 `EventLog` writes append-only JSONL records with a SHA-256 hash chain and
-flushes each appended record. `read_events` validates the complete chain, and
-`replay` rebuilds the submitted `ResearchRun` without provider calls. This is
-integrity checking and deterministic record reconstruction, not a replay of
-model execution.
+flushes each appended record. A `research_complete` record seals the log:
+further appends, a chain with events after completion, or a chain lacking a
+final completion record are rejected. `read_events` validates the complete
+chain, and `replay` rebuilds the submitted `ResearchRun` without provider
+calls. This is integrity checking and deterministic record reconstruction, not
+a replay of model execution.
 
 `ArtifactStore` is a local content-addressed store. It writes objects
 atomically, bounds each object and the whole store, verifies bytes on read, and
@@ -67,20 +70,24 @@ paper.
 
 The agent-harness API executes a declared `HarnessNode` tree through an
 injected executor. It validates maximum depth, node count, children per node,
-and sibling concurrency before the first executor call. Siblings may execute in
-a bounded pool, but records are returned in declared order. The executor gets
-artifact references only, not credentials or host paths. This is a bounded plan
-executor, not an implementation or reproduction of a model-generated,
-asynchronous Recursive Agent Harness script.
+and sibling concurrency before the first executor call. A single semaphore
+bounds concrete executor calls across every depth of the tree; records still
+return in declared order. The executor gets artifact references only, not
+credentials or host paths. This is a bounded plan executor, not an
+implementation or reproduction of a model-generated, asynchronous Recursive
+Agent Harness script.
 
 ## Prompt optimisation
 
 RLMOpt-inspired APIs create immutable prompt candidates with typed sections.
 They pin train, validation, and test fingerprints, permit selection on
-validation bytes only, impose candidate and cost ceilings, compute a Pareto
-frontier, and use uncertainty-aware regression gates. `evolve` is deterministic
-given its seed. It has no operation that applies a selected candidate to the
-shipping runtime: promoting a prompt remains a reviewed release change.
+validation bytes only, compute a Pareto frontier, and use uncertainty-aware
+regression gates. An optional cost estimator creates a permit before a candidate
+can be evaluated; the permit is settled against actual cost or refunded after a
+failure. Candidates that cannot be reserved are recorded as refused without
+calling an evaluator. `evolve` is deterministic given its seed. It has no
+operation that applies a selected candidate to the shipping runtime: promoting
+a prompt remains a reviewed release change.
 
 ## Local anomaly evaluation
 
@@ -89,7 +96,9 @@ time-series anomaly questions. A caller supplies `manifest.json` and `data.jsonl
 the manifest pins the data hash, revision, split, and row count. Predictions are
 one strict JSON object, with no prose recovery. The adapter reports task-shaped
 metrics for localization, classification with evidence, magnitude,
-multi-channel events, and lead-lag.
+multi-channel events, and lead-lag. Lead-lag labels must state a positive
+series length, and their lag cannot exceed it; incomplete local labels are
+rejected before scoring.
 
 It is a clean-room local format inspired by TimeRLM and AnomalyXL. It does not
 vendor, fetch, score, or claim parity with the official benchmark. It becomes

@@ -11,3 +11,9 @@
   evidence-aware harness.
 - Corrected public documentation to separate implemented behavior from prepared
   fan-out work and to credit related RLM implementations.
+- Bound every research trial to its depth-zero control's task and budget
+  identity, sealed completed research event logs, and bounded agent-harness
+  execution across the full tree.
+- Added pre-dispatch permits for prompt-optimisation evaluations and stricter
+  local AnomalyXL lead-lag label validation.
+- Extended the installed-wheel smoke test to research inspection commands.

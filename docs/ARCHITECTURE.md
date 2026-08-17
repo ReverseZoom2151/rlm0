@@ -162,18 +162,21 @@ ordinary Run records
 ```
 
 `ResearchRun` keeps a depth-zero control and fingerprints its configuration and
-budget. `EventLog` is append-only and hash chained; replay validates and
-reconstructs persisted records without rerunning a provider. `ArtifactStore`
-is atomic and bounded, and stages carry artifact digests instead of exposing
-host paths to strategy executors.
+budget. Its trials must use that control's task and budget identity. `EventLog`
+is append-only and hash chained, then seals at completion; replay rejects a
+missing or nonterminal completion and reconstructs persisted records without
+rerunning a provider. `ArtifactStore` is atomic and bounded, and stages carry
+artifact digests instead of exposing host paths to strategy executors.
 
 The strategies are dependency-injected. SRLM receives candidate runs from a
 factory, verifier recombination receives a verifier, Chained RLM receives fresh
 roots, and the agent-harness path receives a declared plan plus an executor.
 This keeps their budgets, provider choices, and sandbox assembly outside the
-research contracts. It also means none of them is a claimed paper reproduction
-or a ready-made autonomous orchestration system. Details and API limits are in
-[RESEARCH.md](RESEARCH.md).
+research contracts. The agent-harness executor applies one global concurrency
+bound to work at every tree depth, while prompt optimisation reserves estimated
+evaluation cost before dispatch. None of these APIs is a claimed paper
+reproduction or a ready-made autonomous orchestration system. Details and API
+limits are in [RESEARCH.md](RESEARCH.md).
 
 [`benchmarks/anomalyxl.py`](../src/rlm0/benchmarks/anomalyxl.py) is similarly
 separate from the published benchmark adapters. It accepts only a local,

@@ -77,8 +77,7 @@ recorded in [`benchmarks/registry.py`](../src/rlm0/benchmarks/registry.py).
 - Integrate the existing conservative RLM-JB-style screen into an explicit
   research command only after its policy, model, and false-positive costs are
   specified. Its parse failures already produce `unknown`, not `safe`.
-- Expose the existing versioned, hash-chained event log and replay APIs through
-  inspect/replay commands before the first external evaluation release.
+- Keep the built-wheel smoke test current as research inspection commands grow.
 
 ## Optional research policies
 
