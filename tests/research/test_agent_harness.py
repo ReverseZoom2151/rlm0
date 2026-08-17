@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from _thread import LockType
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 
@@ -130,3 +132,61 @@ def test_depth_limit_applies_to_grandchildren_before_execution(tmp_path: Path) -
             limits=HarnessLimits(max_depth=1),
         )
     assert executor.calls == []
+
+
+def test_nested_siblings_share_the_global_bounded_pool(tmp_path: Path) -> None:
+    barrier = Barrier(2, timeout=2)
+
+    @dataclass
+    class NestedExecutor:
+        active: int = 0
+        maximum_active: int = 0
+        lock: LockType = field(default_factory=Lock)
+
+        def execute(
+            self,
+            request: HarnessRequest,
+            *,
+            inherited_artifacts: tuple[ArtifactRef, ...],
+            depth: int,
+        ) -> Run:
+            del inherited_artifacts
+            with self.lock:
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+            try:
+                if depth == 2:
+                    barrier.wait()
+                return _run(request.node_id)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    tree = HarnessNode(
+        HarnessRequest("root", "root", "context"),
+        children=(
+            HarnessNode(
+                HarnessRequest("parent", "parent", "context"),
+                children=(
+                    HarnessNode(HarnessRequest("left", "left", "context")),
+                    HarnessNode(HarnessRequest("right", "right", "context")),
+                ),
+            ),
+        ),
+    )
+    executor = NestedExecutor()
+
+    result = run_agent_harness(
+        tree,
+        executor=executor,
+        artifacts=_store(tmp_path),
+        limits=HarnessLimits(max_depth=2, max_concurrency=2),
+    )
+
+    assert [node_id for node_id, _ in result.node_runs] == [
+        "root",
+        "parent",
+        "left",
+        "right",
+    ]
+    assert executor.maximum_active == 2

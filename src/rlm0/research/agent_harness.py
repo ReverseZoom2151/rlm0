@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import BoundedSemaphore
 from typing import Protocol, runtime_checkable
 
 from rlm0.research.artifacts import ArtifactRef, ArtifactStore
@@ -116,6 +117,18 @@ class HarnessResult:
         return self.trial.run
 
 
+@dataclass(frozen=True, slots=True)
+class _NodeExecution:
+    """One completed node plus its descendants in declared preorder."""
+
+    node: HarnessNode
+    depth: int
+    inherited: tuple[ArtifactRef, ...]
+    run: Run
+    output: ArtifactRef | None
+    descendants: tuple[_NodeExecution, ...]
+
+
 def _validate_tree(node: HarnessNode, limits: HarnessLimits) -> tuple[int, set[str]]:
     """Reject a structurally unsafe plan before its first executor call."""
 
@@ -191,15 +204,18 @@ def run_agent_harness(
     effective_limits = HarnessLimits() if limits is None else limits
     count, _ = _validate_tree(root, effective_limits)
     del count
-    node_runs: list[tuple[str, Run]] = []
-    stages: list[ResearchStage] = []
+    execution_slots = BoundedSemaphore(effective_limits.max_concurrency)
 
     def execute_node(
-        node: HarnessNode,
-        depth: int,
-        inherited: tuple[ArtifactRef, ...],
-    ) -> tuple[Run, ArtifactRef | None]:
-        run = executor.execute(node.request, inherited_artifacts=inherited, depth=depth)
+        node: HarnessNode, depth: int, inherited: tuple[ArtifactRef, ...]
+    ) -> _NodeExecution:
+        # Nested pools let every sibling set fan out. The one shared semaphore,
+        # rather than a separate pool size at each depth, is the global bound on
+        # simultaneous concrete agent runs.
+        with execution_slots:
+            run = executor.execute(
+                node.request, inherited_artifacts=inherited, depth=depth
+            )
         if run.baseline is None:
             raise ValueError(
                 f"harness executor returned {node.request.node_id!r} without a "
@@ -208,100 +224,50 @@ def run_agent_harness(
         output = (
             None
             if run.answer is None
-            else artifacts.put_text(
-                run.answer, media_type="text/plain; charset=utf-8"
-            )
-        )
-        node_runs.append((node.request.node_id, run))
-        stages.append(
-            _stage(
-                ordinal=len(stages),
-                node=node,
-                depth=depth,
-                run=run,
-                inherited=inherited,
-                produced=output,
-            )
+            else artifacts.put_text(run.answer, media_type="text/plain; charset=utf-8")
         )
         child_inherited = (*inherited, *node.request.artifact_refs)
         if output is not None:
             child_inherited = (*child_inherited, output)
-
-        def execute_child(
-            child: HarnessNode,
-        ) -> tuple[str, list[tuple[str, Run]], list[ResearchStage]]:
-            # Child work cannot safely mutate the parent collections while a
-            # sibling is running.  Its local execution returns records for the
-            # parent to append in plan order below.
-            local_runs: list[tuple[str, Run]] = []
-            local_stages: list[ResearchStage] = []
-
-            def local(
-                node_to_run: HarnessNode,
-                local_depth: int,
-                local_inherited: tuple[ArtifactRef, ...],
-            ) -> None:
-                child_run = executor.execute(
-                    node_to_run.request,
-                    inherited_artifacts=local_inherited,
-                    depth=local_depth,
-                )
-                if child_run.baseline is None:
-                    raise ValueError(
-                        "harness executor returned "
-                        f"{node_to_run.request.node_id!r} without a "
-                        "depth-zero control"
-                    )
-                child_output = (
-                    None
-                    if child_run.answer is None
-                    else artifacts.put_text(
-                        child_run.answer, media_type="text/plain; charset=utf-8"
-                    )
-                )
-                local_runs.append((node_to_run.request.node_id, child_run))
-                local_stages.append(
-                    _stage(
-                        ordinal=0,
-                        node=node_to_run,
-                        depth=local_depth,
-                        run=child_run,
-                        inherited=local_inherited,
-                        produced=child_output,
-                    )
-                )
-                next_inherited = (*local_inherited, *node_to_run.request.artifact_refs)
-                if child_output is not None:
-                    next_inherited = (*next_inherited, child_output)
-                for grandchild in node_to_run.children:
-                    local(grandchild, local_depth + 1, next_inherited)
-
-            local(child, depth + 1, child_inherited)
-            return child.request.node_id, local_runs, local_stages
-
+        descendants: tuple[_NodeExecution, ...] = ()
         if node.children:
             with ThreadPoolExecutor(
                 max_workers=min(effective_limits.max_concurrency, len(node.children))
             ) as pool:
-                completed = list(pool.map(execute_child, node.children))
-            for _, child_runs, child_stages in completed:
-                for child_id, child_run in child_runs:
-                    node_runs.append((child_id, child_run))
-                for child_stage in child_stages:
-                    stages.append(
-                        ResearchStage.create(
-                            len(stages), child_stage.name, child_stage.config,
-                            metadata=child_stage.metadata,
-                        )
+                descendants = tuple(
+                    pool.map(
+                        lambda child: execute_node(child, depth + 1, child_inherited),
+                        node.children,
                     )
-        return run, output
+                )
+        return _NodeExecution(node, depth, inherited, run, output, descendants)
 
-    root_run, _ = execute_node(root, 0, ())
+    def flatten(execution: _NodeExecution) -> tuple[_NodeExecution, ...]:
+        return (
+            execution,
+            *(nested for child in execution.descendants for nested in flatten(child)),
+        )
+
+    root_execution = execute_node(root, 0, ())
+    ordered = flatten(root_execution)
+    node_runs = tuple((item.node.request.node_id, item.run) for item in ordered)
+    stages = tuple(
+        _stage(
+            ordinal=ordinal,
+            node=item.node,
+            depth=item.depth,
+            run=item.run,
+            inherited=item.inherited,
+            produced=item.output,
+        )
+        for ordinal, item in enumerate(ordered)
+    )
+    root_run = root_execution.run
     trial = ResearchTrial.create(
         trial_id,
         "recursive_agent_harness",
         root_run,
-        stages=tuple(stages),
+        stages=stages,
         config={
             "max_depth": effective_limits.max_depth,
             "max_children_per_node": effective_limits.max_children_per_node,
@@ -310,4 +276,4 @@ def run_agent_harness(
         },
         budget={"summary": root_run.budget_summary},
     )
-    return HarnessResult(trial=trial, node_runs=tuple(node_runs))
+    return HarnessResult(trial=trial, node_runs=node_runs)
