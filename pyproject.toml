@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "rlm0"
 version = "0.1.0"
-description = "Recursive Language Models (RLM) with a depth-0 baseline on every run, tree-wide budget reservation, prefix caching across sub-calls, and a network-isolated sandbox"
+description = "A bounded runtime for Recursive Language Models with a depth-0 control, shared budgets, parallel subcalls, and isolated Python execution"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
