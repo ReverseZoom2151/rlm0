@@ -116,6 +116,19 @@ def test_loader_refuses_data_that_no_longer_matches_its_lock(tmp_path: Path) -> 
         AnomalyXL().load(root=root)
 
 
+def test_loader_refuses_an_incomplete_lead_lag_gold_label(tmp_path: Path) -> None:
+    root = tmp_path / "anomalyxl"
+    rows = _rows()
+    rows[-1] = {
+        **rows[-1],
+        "label": {"direction": "lead", "lag_samples": 3},
+    }
+    _write_local_split(root, rows)
+
+    with pytest.raises(BenchmarkDataError, match="positive integer length"):
+        AnomalyXL().load(root=root)
+
+
 def test_strict_parser_rejects_prose_missing_fields_and_nan() -> None:
     assert parse_prediction('{"present": true, "start": 2, "end": 4}', "localize")
     assert (
@@ -184,6 +197,40 @@ def test_magnitude_multichannel_and_leadlag_metrics() -> None:
     )
     assert lag.values["within_1pct"] == 1.0
     assert lag.primary == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize(
+    "gold, message",
+    [
+        ({"direction": "lead", "lag_samples": 3}, "positive integer length"),
+        (
+            {"direction": "lag", "lag_samples": 3, "length": 0},
+            "at least one",
+        ),
+        (
+            {"direction": "lead", "lag_samples": 11, "length": 10},
+            "must not exceed",
+        ),
+    ],
+)
+def test_lead_lag_labels_need_the_length_the_scorer_uses(
+    gold: dict[str, object], message: str
+) -> None:
+    with pytest.raises(BenchmarkDataError, match=message):
+        score_prediction(
+            "lead_lag_with_magnitude",
+            gold,
+            '{"direction": "lead", "lag_samples": 3}',
+        )
+
+
+def test_exact_lead_lag_prediction_scores_perfectly_on_a_complete_label() -> None:
+    metrics = score_prediction(
+        "lead_lag_with_magnitude",
+        {"direction": "lead", "lag_samples": 3, "length": 100},
+        '{"direction": "lead", "lag_samples": 3}',
+    )
+    assert metrics.primary == 1.0
 
 
 def test_scoreboard_exposes_metrics_without_claiming_public_parity(

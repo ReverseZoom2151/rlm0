@@ -125,7 +125,20 @@ def _validate_events(events: object, *, where: str) -> list[dict[str, Any]]:
     return checked
 
 
-def _validate_label(category: str, label: object) -> dict[str, Any]:
+def _positive_length(label: Mapping[str, Any]) -> int:
+    """Read the series length needed to normalize a lead or lag error."""
+
+    if "length" not in label:
+        raise BenchmarkDataError("lead-lag label needs a positive integer length")
+    length = _index(label["length"], "length")
+    if length < 1:
+        raise BenchmarkDataError("lead-lag label length must be at least one")
+    return length
+
+
+def _validate_label(
+    category: str, label: object, *, require_length: bool = False
+) -> dict[str, Any]:
     if not isinstance(label, dict):
         raise BenchmarkDataError(f"{category} label must be an object")
     result = dict(label)
@@ -164,6 +177,12 @@ def _validate_label(category: str, label: object) -> dict[str, Any]:
             lag = _index(result.get("lag_samples"), "lag_samples")
             if lag < 0:
                 raise BenchmarkDataError("lag_samples must not be negative")
+            if require_length:
+                length = _positive_length(result)
+                if lag > length:
+                    raise BenchmarkDataError(
+                        "lag_samples must not exceed the series length"
+                    )
         return result
     raise BenchmarkDataError(f"unknown AnomalyXL category {category!r}")
 
@@ -376,7 +395,7 @@ def score_prediction(
     category: str, gold: Mapping[str, Any], output: str | None
 ) -> AnomalyMetrics:
     """Score one strict prediction using local, task-specific labels."""
-    checked_gold = _validate_label(category, gold)
+    checked_gold = _validate_label(category, gold, require_length=True)
     prediction = parse_prediction(output, category)
     dispatch = {
         "localize": _score_localize,
@@ -535,7 +554,7 @@ class AnomalyXL:
                 raise BenchmarkDataError(
                     f"row {index} context and question must be strings"
                 )
-            label = _validate_label(category, row["label"])
+            label = _validate_label(category, row["label"], require_length=True)
             docs = chunk_context(
                 row["context"], f"anomalyxl-{sample_id}", target_chars=self.chunk_chars
             )
