@@ -25,6 +25,7 @@ another turn, not a traceback in the orchestrator.
 
 from __future__ import annotations
 
+import json
 import keyword
 import re
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from enum import StrEnum
 __all__ = [
     "EXECUTABLE_LANGUAGES",
     "CodeBlock",
+    "CompletionSource",
     "FinalAnswer",
     "FinalKind",
     "ParsedTurn",
@@ -60,6 +62,22 @@ class FinalKind(StrEnum):
     VARIABLE = "variable"
     """FINAL_VAR(name) named a REPL variable holding the answer."""
 
+    PROTOCOL = "protocol"
+    """A structured, versioned completion envelope supplied the answer."""
+
+
+class CompletionSource(StrEnum):
+    """How an answer crossed the model/runtime boundary.
+
+    ``RLM0_FINAL_V1`` is the reportable protocol. ``FINAL`` and ``FINAL_VAR``
+    remain accepted so existing trajectories do not become unreadable, but a
+    caller can distinguish their recovered answer from a structured one.
+    """
+
+    V1 = "rlm0_final_v1"
+    RECOVERED_FINAL = "recovered_final"
+    RECOVERED_FINAL_VAR = "recovered_final_var"
+
 
 class Rejection(StrEnum):
     """Why a directive that was present did not become the answer."""
@@ -68,6 +86,7 @@ class Rejection(StrEnum):
     CODE_IN_SAME_TURN = "code_in_same_turn"
     MALFORMED_VARIABLE = "malformed_variable"
     EMPTY_ANSWER = "empty_answer"
+    MALFORMED_PROTOCOL = "malformed_protocol"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +115,11 @@ class FinalAnswer:
     terminated: bool = True
     """False when the directive was never closed and the tail was taken."""
 
+    source: CompletionSource = CompletionSource.RECOVERED_FINAL
+    protocol_version: int | None = None
+    evidence: tuple[str, ...] = ()
+    answer_artifact: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedTurn:
@@ -118,6 +142,7 @@ class ParsedTurn:
 
 _FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>[^\n`]*)$")
 _DIRECTIVE = re.compile(r"(?<![0-9A-Za-z_])FINAL(?P<var>_VAR)?[ \t]*\(")
+_V1_DIRECTIVE = re.compile(r"(?<![0-9A-Za-z_])RLM0_FINAL_V1[ \t]*\(")
 _INLINE_CODE = re.compile(r"(?P<ticks>`+)(?P<body>[^\n]*?)(?P=ticks)")
 
 
@@ -254,10 +279,13 @@ def find_final_answer(text: str) -> tuple[FinalAnswer | None, Rejection | None]:
     do.
     """
     masked = _mask_code(text)
-    matches = list(_DIRECTIVE.finditer(masked))
+    protocol_matches = list(_V1_DIRECTIVE.finditer(masked))
+    legacy_matches = list(_DIRECTIVE.finditer(masked))
+    matches = [(match.start(), "v1", match) for match in protocol_matches]
+    matches.extend((match.start(), "legacy", match) for match in legacy_matches)
     if not matches:
         return None, None
-    match = matches[-1]
+    _, family, match = max(matches, key=lambda item: item[0])
     open_idx = match.end() - 1
     close_idx, terminated = _argument_span(masked, open_idx)
     if terminated:
@@ -266,14 +294,77 @@ def find_final_answer(text: str) -> tuple[FinalAnswer | None, Rejection | None]:
             close_idx = extended
     raw = text[open_idx + 1 : close_idx]
     value = raw.strip()
+    if family == "v1":
+        return _parse_v1(value, terminated)
     if match.group("var"):
         name = value.strip("`")
         if not name.isidentifier() or keyword.iskeyword(name):
             return None, Rejection.MALFORMED_VARIABLE
-        return FinalAnswer(FinalKind.VARIABLE, name, terminated), None
+        return (
+            FinalAnswer(
+                FinalKind.VARIABLE,
+                name,
+                terminated,
+                CompletionSource.RECOVERED_FINAL_VAR,
+            ),
+            None,
+        )
     if not value:
         return None, Rejection.EMPTY_ANSWER
-    return FinalAnswer(FinalKind.LITERAL, value, terminated), None
+    return (
+        FinalAnswer(
+            FinalKind.LITERAL,
+            value,
+            terminated,
+            CompletionSource.RECOVERED_FINAL,
+        ),
+        None,
+    )
+
+
+def _parse_v1(
+    value: str, terminated: bool
+) -> tuple[FinalAnswer | None, Rejection | None]:
+    """Parse the one completion shape that may back a reportable result.
+
+    The envelope intentionally has no permissive defaults. A malformed version
+    marker is a model mistake to correct next turn, not an opportunity to turn
+    arbitrary prose into a clean structured answer.
+    """
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None, Rejection.MALFORMED_PROTOCOL
+    if not isinstance(payload, dict):
+        return None, Rejection.MALFORMED_PROTOCOL
+    required = {"protocol_version", "status", "answer", "evidence", "answer_artifact"}
+    if set(payload) != required:
+        return None, Rejection.MALFORMED_PROTOCOL
+    if payload["protocol_version"] != 1 or payload["status"] != "answered":
+        return None, Rejection.MALFORMED_PROTOCOL
+    answer = payload["answer"]
+    evidence = payload["evidence"]
+    artifact = payload["answer_artifact"]
+    if not isinstance(answer, str) or not answer.strip():
+        return None, Rejection.EMPTY_ANSWER
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, str) for item in evidence
+    ):
+        return None, Rejection.MALFORMED_PROTOCOL
+    if artifact is not None and not isinstance(artifact, str):
+        return None, Rejection.MALFORMED_PROTOCOL
+    return (
+        FinalAnswer(
+            FinalKind.PROTOCOL,
+            answer,
+            terminated,
+            CompletionSource.V1,
+            protocol_version=1,
+            evidence=tuple(evidence),
+            answer_artifact=artifact,
+        ),
+        None,
+    )
 
 
 def parse_turn(text: str, *, code_has_run: bool = True) -> ParsedTurn:

@@ -161,14 +161,21 @@ route around."""
 
 
 _FINAL = """\
-Finishing. When, and only when, you have the answer, end a turn with one of:
+Finishing. When, and only when, you have the answer, end a turn with:
 
-- FINAL(your complete answer goes here)
-- FINAL_VAR(name_of_a_variable)
+RLM0_FINAL_V1({"protocol_version": 1, "status": "answered", "answer":
+"your complete answer", "evidence": ["short supporting facts or locations"],
+"answer_artifact": null})
 
-FINAL_VAR returns the current value of that REPL variable as your answer,
-which is how an answer longer than your output limit gets out. Pass a bare
-variable name, nothing else.
+The JSON object must contain exactly those five fields. `evidence` is a list
+of short strings naming what you actually found, and `answer_artifact` is null
+unless a host-provided answer artifact is available. This protocol is how a
+result becomes reportable.
+
+For compatibility, FINAL(your complete answer) and FINAL_VAR(name) are still
+accepted, but they are recorded as recovered legacy completions. FINAL_VAR
+returns the current value of that REPL variable as the answer, which is how an
+answer longer than your output limit gets out. Pass a bare variable name.
 
 Both are read from your prose, not from your code. A directive written inside
 a ```repl block, inside a string, or inside backticks is ignored, so quoting
@@ -195,7 +202,13 @@ The REPL session holds:
    that prompt. It cannot see the REPL, it cannot see your conversation, and
    it remembers nothing between calls, so every call has to be self contained.
    It reads about {sub_call_chars} characters comfortably.
-3. `print()`, which is the only way anything reaches you.
+3. `rlm_batch([[prompt, handle], ...]) -> list[str]`, for independent sub-
+   questions that can be answered from named REPL variables. Each `handle`
+   names a variable holding the slice that child should read. The host reserves
+   the whole batch before it starts, warms the shared cache prefix once, and
+   returns answers in the same order. Use it only when the children do not
+   depend on one another.
+4. `print()`, which is the only way anything reaches you.
 
 `llm_query` is what makes reading possible at all. Code can find and count and
 split, but any judgement about what the text means has to be made by a model

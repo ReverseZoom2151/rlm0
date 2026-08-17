@@ -12,6 +12,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from rlm0.parse import (
+    CompletionSource,
     FinalKind,
     Rejection,
     extract_code_blocks,
@@ -96,6 +97,30 @@ def test_plain_final_answer() -> None:
     assert final is not None
     assert final.kind is FinalKind.LITERAL
     assert final.value == "the answer is 42"
+    assert final.source is CompletionSource.RECOVERED_FINAL
+
+
+def test_versioned_completion_protocol_carries_evidence() -> None:
+    text = (
+        'RLM0_FINAL_V1({"protocol_version": 1, "status": "answered", '
+        '"answer": "42", "evidence": ["sum at row 7"], '
+        '"answer_artifact": null})'
+    )
+    final, rejection = find_final_answer(text)
+    assert rejection is None
+    assert final is not None
+    assert final.source is CompletionSource.V1
+    assert final.protocol_version == 1
+    assert final.evidence == ("sum at row 7",)
+
+
+def test_versioned_completion_rejects_missing_or_extra_fields() -> None:
+    final, rejection = find_final_answer(
+        'RLM0_FINAL_V1({"protocol_version": 1, "status": "answered", '
+        '"answer": "42", "evidence": []})'
+    )
+    assert final is None
+    assert rejection is Rejection.MALFORMED_PROTOCOL
 
 
 def test_answer_containing_parentheses_survives() -> None:

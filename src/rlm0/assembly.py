@@ -57,7 +57,7 @@ from rlm0.observation import (
     DEFAULT_STDOUT_CAP,
     format_observation,
 )
-from rlm0.parse import FinalKind, Rejection, parse_turn
+from rlm0.parse import CompletionSource, FinalKind, Rejection, parse_turn
 from rlm0.policy import Escalating
 from rlm0.ports import (
     Budget,
@@ -394,6 +394,7 @@ class _Turn:
 
     code: str | None
     final_answer: str | None
+    completion_source: CompletionSource | None = None
 
 
 @dataclass(slots=True)
@@ -539,7 +540,11 @@ class _Bridge:
                 answer = parsed.final.value
             else:
                 answer = self._read_variable(parsed.final.value)
-        return _Turn(code=code, final_answer=answer)
+        return _Turn(
+            code=code,
+            final_answer=answer,
+            completion_source=None if parsed.final is None else parsed.final.source,
+        )
 
     def _read_variable(self, name: str) -> str | None:
         """Resolve FINAL_VAR against the REPL that produced it.
@@ -608,6 +613,11 @@ _NO_ACTION: dict[Rejection | None, str] = {
         "the answer was held back; repeat the answer on its own next turn if "
         "the output has not changed your mind."
     ),
+    Rejection.MALFORMED_PROTOCOL: (
+        "RLM0_FINAL_V1 must be one JSON object with protocol_version 1, "
+        "status answered, a non-empty answer, an evidence list and an "
+        "answer_artifact field. Fix the envelope and try again."
+    ),
 }
 
 
@@ -625,6 +635,7 @@ def build_rlm(
     max_iterations: int = 8,
     max_tokens: int = 4096,
     max_attempts: int = 4,
+    experimental_depth: bool = False,
     exec_timeout_s: float = 30.0,
     attempt_timeout_s: float | None = None,
     sub_call_chars: int = SUB_CALL_CHAR_BUDGET,
@@ -686,5 +697,6 @@ def build_rlm(
         attempt_timeout_s=attempt_timeout_s,
         context_variable=CONTEXT_VARIABLE,
         sub_call_name=SUB_CALL_NAME,
+        experimental_depth=experimental_depth,
         clock=clock,
     )
