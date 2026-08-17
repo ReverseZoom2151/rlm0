@@ -18,6 +18,15 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest --disable-warnings
+      - run: python -m pytest --disable-warnings --cov=rlm0 --cov-report=term-missing
       - run: ruff check .
       - run: mypy src tests
+      - name: Build wheel and test its installed CLI
+        run: |
+          wheel_dir=$(mktemp -d)
+          smoke_venv=$(mktemp -d)
+          python -m pip wheel --no-deps --wheel-dir "$wheel_dir" .
+          python -m venv "$smoke_venv"
+          "$smoke_venv/bin/python" -m pip install "$wheel_dir"/*.whl
+          "$smoke_venv/bin/rlm0" --version
+          "$smoke_venv/bin/rlm0" benchmark --list
