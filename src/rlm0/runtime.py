@@ -204,6 +204,7 @@ class _Closed:
     outcome: Outcome
     answer: str | None
     detail: str = ""
+    completion_source: str | None = None
 
 
 @dataclass(slots=True)
@@ -578,6 +579,7 @@ class RLM:
             wall_clock_s=self._clock() - started,
             answer=closed.answer,
             detail=closed.detail,
+            completion_source=closed.completion_source,
         )
         return attempt, state.signals()
 
@@ -713,7 +715,12 @@ class RLM:
                     if source is not None
                     else "completion recovered by parser adapter"
                 )
-                return _Closed(Outcome.ANSWERED, answer, detail)
+                return _Closed(
+                    Outcome.ANSWERED,
+                    answer,
+                    detail,
+                    None if source is None else str(source),
+                )
             messages.append({"role": "assistant", "content": text})
             code = parsed.code
             if code is None:
@@ -955,23 +962,40 @@ class RLM:
         shared_chars = len(self._prompter.system(
             max_depth=max_depth, sub_call_name=self._sub_call_name
         ))
+        # Preserve the guest's order. It is the only ordering signal the host
+        # has, and a model can put the evidence it needs first. A full batch is
+        # still all-or-nothing; only after that request is refused do we reduce
+        # width, returning explicit deferred values for the untouched suffix.
+        selected = len(pairs)
         estimate = self._estimator.estimate(
-            batch_size=len(pairs),
+            batch_size=selected,
             shared_prefix_chars=shared_chars,
             slice_chars=[len(payload) for payload in payloads],
             max_output_tokens=self._max_tokens,
         )
-        # Two calls per child: its first actual turn and the wind-down reserve
-        # held so an exhausted child can still give a partial result.
         reservation = self._budget.reserve(
-            n_calls=2 * len(pairs), estimated_tokens=estimate.tokens
+            n_calls=2 * selected, estimated_tokens=estimate.tokens
         )
+        while not reservation.granted and selected > 1:
+            selected -= 1
+            estimate = self._estimator.estimate(
+                batch_size=selected,
+                shared_prefix_chars=shared_chars,
+                slice_chars=[len(payload) for payload in payloads[:selected]],
+                max_output_tokens=self._max_tokens,
+            )
+            reservation = self._budget.reserve(
+                n_calls=2 * selected, estimated_tokens=estimate.tokens
+            )
         if not reservation.granted:
             state.note_sub_calls_refused(len(pairs))
             return [f"<sub-call refused: {reservation.reason}>"] * len(pairs)
+        deferred = len(pairs) - selected
+        if deferred:
+            state.note_sub_calls_refused(deferred)
 
         held = _HeldCall(self._release)
-        held.add(2 * len(pairs))
+        held.add(2 * selected)
         barrier = _WarmingBarrier(timeout_s=self._warm_timeout_s)
         meter = _BatchMeter()
 
@@ -997,18 +1021,25 @@ class RLM:
                 answer = f"<sub-call did not answer: {closed.outcome.value}>"
             return index, answer
 
-        results = [""] * len(pairs)
+        results = [""] * selected
         try:
             with ThreadPoolExecutor(
-                max_workers=min(self._max_parallel_sub_calls, len(pairs))
+                max_workers=min(self._max_parallel_sub_calls, selected)
             ) as pool:
-                for index, answer in pool.map(work, range(len(pairs))):
+                for index, answer in pool.map(work, range(selected)):
                     results[index] = answer
         finally:
             barrier.open()
             held.give_back()
             self._estimator.record_batch(
                 reserved_tokens=estimate.tokens, actual_tokens=meter.tokens
+            )
+        if deferred:
+            results.extend(
+                [
+                    "<sub-call deferred: batch width reduced by the shared budget>"
+                ]
+                * deferred
             )
         return results
 

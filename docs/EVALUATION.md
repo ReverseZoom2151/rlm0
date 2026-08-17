@@ -4,6 +4,11 @@ Committed in advance, so that it cannot be adjusted after the numbers are in.
 No benchmark result has been published from this repository and none will be
 without a depth-zero row beside it.
 
+CLI evaluation and benchmark runs also require the versioned
+`RLM0_FINAL_V1` completion envelope. The runtime can still read legacy
+`FINAL(...)` trajectories for compatibility, but they are not eligible for a
+new reportable result.
+
 The point of writing this down before running anything is narrow. A protocol
 chosen after seeing results is not a protocol, it is a description of which
 comparison happened to look best. Everything here is checkable against

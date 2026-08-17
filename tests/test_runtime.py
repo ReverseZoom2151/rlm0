@@ -587,6 +587,32 @@ def test_batch_subcalls_reserve_before_workers_start_and_keep_result_order() -> 
     assert harness.rlm.estimator.over_reservation_ratio is not None
 
 
+def test_a_refused_batch_reduces_width_and_marks_the_suffix_deferred() -> None:
+    harness = build(
+        scripted(
+            {"ROOT": ["CODE: NOOP"]},
+            {
+                "ROOT": [
+                    "CODE: BATCH:first|CONTEXT;second|CONTEXT;third|CONTEXT",
+                    "FINAL: done",
+                ],
+                "first": ["FINAL: one"],
+                "second": ["FINAL: two"],
+                "third": ["FINAL: three"],
+            },
+        ),
+        policy=Fixed(1),
+        calls_allowed=7,
+    )
+    run = harness.rlm.complete("ROOT question", context="corpus")
+
+    assert run.answer == "done"
+    assert run.attempts[1].n_sub_calls == 2
+    assert 6 in harness.budget.reservations
+    assert 4 in harness.budget.reservations
+    assert any("deferred" in result.stdout for result in harness.observer.formatted)
+
+
 def test_a_sandbox_that_cannot_service_sub_calls_refuses_loudly() -> None:
     rlm = RLM(
         lm=FakeLM(responder=scripted({"ROOT": ["CODE: NOOP"]})),

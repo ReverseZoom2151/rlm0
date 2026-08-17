@@ -139,12 +139,26 @@ def _check(result: SolverResult, task: SolverTask) -> None:
         )
 
 
+def _check_completion(run: Run, *, policy: GradingPolicy, sample_id: str) -> None:
+    """Keep legacy parser recovery out of results that claim strict provenance."""
+    if not policy.require_versioned_completion:
+        return
+    final = run.final
+    if final.answer is not None and not final.has_versioned_completion:
+        source = final.completion_source or "an unknown completion path"
+        raise SolverContractError(
+            f"{sample_id}: final answer used {source}, but this suite requires "
+            "RLM0_FINAL_V1"
+        )
+
+
 def _attempt_to_dict(attempt: Attempt) -> dict[str, Any]:
     return {
         "max_depth": attempt.max_depth,
         "outcome": attempt.outcome.value,
         "answer": attempt.answer,
         "detail": attempt.detail,
+        "completion_source": attempt.completion_source,
         "wall_clock_s": attempt.wall_clock_s,
         "cost_usd": attempt.cost_usd,
         "cache_read_ratio": attempt.cache_read_ratio,
@@ -308,6 +322,7 @@ def run_suite(
         task = sample.as_task()
         result = solver.solve(task)
         _check(result, task)
+        _check_completion(result.run, policy=policy, sample_id=sample.sample_id)
 
         final_score = grade(
             sample, result.final.answer, result.final.cited_doc_ids, policy=policy

@@ -191,6 +191,13 @@ class Attempt:
     wall_clock_s: float
     answer: str | None = None
     detail: str = ""
+    completion_source: str | None = None
+    """How an answered attempt crossed the model/runtime boundary.
+
+    ``rlm0_final_v1`` is the versioned envelope used for reportable evaluation.
+    Older ``FINAL`` forms remain readable, but preserving their source keeps a
+    compatibility path from quietly becoming a benchmark result.
+    """
 
     def __post_init__(self) -> None:
         if self.max_depth < 0:
@@ -205,6 +212,8 @@ class Attempt:
                 "an answer that did not survive its own stop condition is not "
                 "an answer"
             )
+        if self.completion_source is not None and not self.outcome.produced_answer:
+            raise ValueError("a completion source belongs only to an answered attempt")
         deepest = max((call.depth for call in self.calls), default=0)
         if deepest > self.max_depth:
             raise ValueError(
@@ -239,6 +248,11 @@ class Attempt:
     @property
     def n_sub_calls(self) -> int:
         return sum(1 for call in self.calls if call.role is Role.SUB)
+
+    @property
+    def has_versioned_completion(self) -> bool:
+        """Whether this answer used the reportable completion envelope."""
+        return self.completion_source == "rlm0_final_v1"
 
     @property
     def cache_read_ratio(self) -> float | None:

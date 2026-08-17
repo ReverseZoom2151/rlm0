@@ -34,10 +34,10 @@ comparison against sequential `llm_query` at the same budget.
 ## Next: use the budget to degrade deliberately
 
 The runtime reserves a finalization call, emits a model-visible advisory before
-budget refusal, and winds down after an actual budget refusal. It still does
-not narrow a planned batch before reserving it or cancel already-running
-children. Add a recorded degradation ladder for width reduction, partial
-evidence gathering, deadlines, rate limits, and unpriced usage.
+budget refusal, winds down after an actual budget refusal, and reduces a refused
+batch to the largest reservable prefix. It still cannot cancel a provider call
+already in flight. Add a recorded degradation ladder for partial evidence
+gathering, deadlines, rate limits, and unpriced usage.
 
 ## Evaluation before results
 
@@ -45,8 +45,8 @@ No public benchmark number exists. Before publishing one:
 
 1. Run direct prompting, depth-zero RLM, recursive RLM, and CoT
    self-consistency at matched cost.
-2. Add paired noise-floor computation, multiple sampling seeds, confidence
-   intervals, and per-sample paired deltas.
+2. Schedule the existing paired noise-floor calculation from the CLI, then add
+   multiple sampling seeds, confidence intervals, and per-sample paired deltas.
 3. Run the pinned OOLONG and RULER adapters, then evaluate a task with precise
    evidence localization such as TimeRLM's AnomalyXL if its data and scorer can
    be pinned.
@@ -62,7 +62,6 @@ recorded in [`benchmarks/registry.py`](../src/rlm0/benchmarks/registry.py).
 
 - Exercise the microVM backend on a real KVM host and test the guest kernel,
   network, filesystem, capabilities, environment, and process limits live.
-- Pin the sandbox image by digest for reproducible security testing.
 - Add adversarial tests for context injection, forged protocol frames,
   credential discovery, oversized output, filesystem access, and non-cooperative
   native code.

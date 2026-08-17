@@ -197,6 +197,17 @@ class TestTheHarnessCatchesBadSolvers:
         with pytest.raises(SolverContractError, match="not in the context"):
             run_suite(corpus, ScriptedSolver(plans), tmp_path)
 
+    def test_a_publishable_suite_refuses_an_unversioned_completion(
+        self, corpus: Corpus, tmp_path: Path
+    ) -> None:
+        with pytest.raises(SolverContractError, match="RLM0_FINAL_V1"):
+            run_suite(
+                corpus,
+                ScriptedSolver(perfect_plans(corpus)),
+                tmp_path,
+                policy=GradingPolicy(require_versioned_completion=True),
+            )
+
 
 def test_the_policy_is_carried_into_the_report(
     corpus: Corpus, tmp_path: Path

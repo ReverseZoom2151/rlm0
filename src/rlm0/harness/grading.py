@@ -55,15 +55,23 @@ class GradingPolicy:
     min_evidence_precision: float = 0.5
     """Guards against citing the entire context to guarantee recall."""
 
+    require_versioned_completion: bool = False
+    """Require ``RLM0_FINAL_V1`` for a publishable suite result."""
+
     def __post_init__(self) -> None:
         if not 0.0 <= self.min_evidence_precision <= 1.0:
             raise ValueError("min_evidence_precision must lie in [0, 1]")
 
     def describe(self) -> str:
         completeness = "complete" if self.require_complete_evidence else "partial"
+        completion = (
+            "versioned completion required"
+            if self.require_versioned_completion
+            else "legacy completion allowed"
+        )
         return (
             f"evidence {completeness}, precision >= "
-            f"{self.min_evidence_precision:.2f}"
+            f"{self.min_evidence_precision:.2f}; {completion}"
         )
 
 

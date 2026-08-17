@@ -67,12 +67,15 @@ the assembled runtime.
 The runtime reserves a finalization call before a turn that may need it. It
 settles calls after provider responses and releases reservations that were not
 used. On a bound refusal it asks for a bounded wind-down instead of throwing
-away the trajectory. It does not yet reduce a planned fan-out before a refusal.
+away the trajectory. A refused batch is reduced to the largest reservable
+prefix, with the deferred suffix made explicit to the model.
 
 The runtime supports `rlm_batch([[query, handle], ...])` for independent child
 questions. It reserves the complete batch before dispatch, uses a bounded worker
 pool, lets one child warm the cache prefix, preserves input order in its results,
-and returns unused initial holds. Ordinary `llm_query` remains sequential. This
+and returns unused initial holds. If the full batch cannot be reserved, it
+reduces width in guest order and returns explicit deferred entries for the
+suffix. Ordinary `llm_query` remains sequential. This
 distinction matters because a cold parallel fan-out can duplicate prefix-cache
 writes.
 
@@ -130,8 +133,9 @@ self-consistency baselines. OOLONG and RULER S-NIAH adapters are implemented
 as library APIs with pinned-data requirements.
 
 The harness rejects comparisons across different corpora, samples, or grading
-policies, and requires a depth-zero row. It does not yet compute a paired noise
-floor or provide HAL integration.
+policies, and requires a depth-zero row. The report layer can compute a paired
+noise floor, but the CLI does not yet schedule replicates for it or provide HAL
+integration.
 
 ## Layer boundaries
 

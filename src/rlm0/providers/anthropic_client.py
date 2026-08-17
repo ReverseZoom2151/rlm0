@@ -66,11 +66,10 @@ the cost model rather than a tuning step, and it is why this file cannot
 enforce it alone. A client sees one call at a time and cannot know it is part
 of a fan-out.
 
-Sub-calls are sequential today, so a cold fan-out cannot currently be issued
-and the problem does not arise. This note exists because parallel sub-calls are
-the obvious next feature, and adding them without a barrier would make every
-fan-out quietly more expensive while the cache hit rate reported beside it sat
-near zero and looked like somebody else's bug.
+`rlm_batch` uses this barrier for independent child calls. It is still a
+diagnostic, not a savings claim: live provider measurements must show the cache
+read and write fields before a benchmark can attribute any cost reduction to
+the barrier.
 """
 
 from __future__ import annotations

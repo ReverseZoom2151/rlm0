@@ -207,7 +207,9 @@ The REPL session holds:
    names a variable holding the slice that child should read. The host reserves
    the whole batch before it starts, warms the shared cache prefix once, and
    returns answers in the same order. Use it only when the children do not
-   depend on one another.
+   depend on one another. Put the most important questions first: if the shared
+   budget cannot fund the full batch, later entries return an explicit deferred
+   result instead of a partial, silent dispatch.
 4. `print()`, which is the only way anything reaches you.
 
 `llm_query` is what makes reading possible at all. Code can find and count and

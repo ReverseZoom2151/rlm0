@@ -82,9 +82,10 @@ path the real system does not have.
 """
 
 _FAKE_FINAL_TURN = (
-    "FINAL(the fake provider does not answer questions. It exists so that the "
-    "sandbox, the budget and the run record can be exercised end to end "
-    "without calling a model.)"
+    'RLM0_FINAL_V1({"protocol_version": 1, "status": "answered", "answer": '
+    '"the fake provider does not answer questions. It exists so that the sandbox, '
+    'the budget and the run record can be exercised end to end without calling a '
+    'model.", "evidence": [], "answer_artifact": null})'
 )
 """What it says on every turn after the first."""
 
@@ -456,7 +457,7 @@ def cmd_eval(args: argparse.Namespace, argv: Sequence[str]) -> int:
             corpus,
             solver,
             args.out,
-            policy=GradingPolicy(),
+            policy=GradingPolicy(require_versioned_completion=True),
             invocation=list(argv),
             resume=not args.no_resume,
         )
@@ -540,7 +541,7 @@ def cmd_benchmark(args: argparse.Namespace, argv: Sequence[str]) -> int:
             suite,
             solver,
             args.out,
-            policy=GradingPolicy(),
+            policy=GradingPolicy(require_versioned_completion=True),
             invocation=list(argv),
             resume=not args.no_resume,
         )
@@ -1037,7 +1038,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="check that a sandbox is available and say which backend",
         description=(
             "Reports which sandbox backend this machine can provide. Docker is "
-            "the only one that is a boundary."
+            "the default containment boundary; a configured microVM backend "
+            "is a separate, experimental boundary."
         ),
     )
     sandbox.add_argument(
