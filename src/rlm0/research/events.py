@@ -130,8 +130,13 @@ class EventLog:
         events = read_events(path) if path.exists() else ()
         self._next_sequence = len(events)
         self._previous_digest = events[-1].digest if events else _GENESIS
+        self._complete = any(event.kind == "research_complete" for event in events)
+        if self._complete and events[-1].kind != "research_complete":
+            raise EventValidationError("event log contains an event after completion")
 
     def append(self, kind: str, payload: Mapping[str, Any], *, at: str) -> EventRecord:
+        if self._complete:
+            raise EventValidationError("cannot append after research_complete")
         event = EventRecord.create(
             self._next_sequence, kind, at, payload, self._previous_digest
         )
@@ -142,6 +147,7 @@ class EventLog:
             os.fsync(handle.fileno())
         self._next_sequence += 1
         self._previous_digest = event.digest
+        self._complete = event.kind == "research_complete"
         return event
 
 
@@ -218,6 +224,10 @@ def replay(events: Iterable[EventRecord]) -> ResearchReplay:
     if not event_tuple or event_tuple[0].kind != "research_started":
         raise EventValidationError("a research log must begin with research_started")
     start = event_tuple[0].payload
+    if start.get("research_schema") != RESEARCH_SCHEMA_VERSION:
+        raise EventValidationError(
+            "research_started has an unsupported research schema"
+        )
     raw_research = start.get("research")
     if not isinstance(raw_research, Mapping):
         raise EventValidationError("research_started event needs a research record")
@@ -226,6 +236,8 @@ def replay(events: Iterable[EventRecord]) -> ResearchReplay:
     recorded: set[str] = set()
     complete = False
     for event in event_tuple[1:]:
+        if complete:
+            raise EventValidationError("event follows research_complete")
         if event.kind == "trial_recorded":
             trial_id = event.payload.get("trial_id")
             if not isinstance(trial_id, str) or trial_id not in trials:
@@ -250,4 +262,6 @@ def replay(events: Iterable[EventRecord]) -> ResearchReplay:
         raise EventValidationError("not every trial was recorded")
     if not complete:
         raise EventValidationError("research log has no completion event")
+    if event_tuple[-1].kind != "research_complete":
+        raise EventValidationError("research_complete must be the final event")
     return ResearchReplay(research, event_tuple)

@@ -8,6 +8,7 @@ import pytest
 from rlm0.research.contracts import ResearchRun, ResearchTrial
 from rlm0.research.events import (
     EventLog,
+    EventRecord,
     EventValidationError,
     read_events,
     replay,
@@ -89,4 +90,67 @@ def test_replay_refuses_missing_trial_record(tmp_path: Path) -> None:
     log.append("research_complete", {"research_id": research.research_id}, at="t")
 
     with pytest.raises(EventValidationError, match="every trial"):
+        replay(read_events(path))
+
+
+def test_event_log_refuses_an_append_after_completion(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    write_research_events(log, _research(), at="t")
+
+    with pytest.raises(EventValidationError, match="cannot append"):
+        log.append("trial_recorded", {}, at="later")
+
+
+def test_replay_refuses_any_record_after_completion(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    research = _research()
+    log = EventLog(path)
+    log.append(
+        "research_started",
+        {"research": research.to_dict(), "research_schema": 1},
+        at="t",
+    )
+    log.append(
+        "trial_recorded",
+        {
+            "trial_id": "one",
+            "config_fingerprint": research.trials[0].config_fingerprint,
+            "budget_fingerprint": research.trials[0].budget_fingerprint,
+        },
+        at="t",
+    )
+    log.append("research_complete", {"research_id": research.research_id}, at="t")
+
+    rows = path.read_text(encoding="utf-8").splitlines()
+    complete = json.loads(rows[-1])
+    event = EventRecord.create(
+        3,
+        "trial_recorded",
+        "t",
+        {
+            "trial_id": "one",
+            "config_fingerprint": research.trials[0].config_fingerprint,
+            "budget_fingerprint": research.trials[0].budget_fingerprint,
+        },
+        str(complete["digest"]),
+    )
+    rows.append(json.dumps(event.to_dict()))
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    with pytest.raises(EventValidationError, match="follows research_complete"):
+        replay(read_events(path))
+
+
+def test_replay_refuses_an_unsupported_embedded_research_schema(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    research = _research()
+    log = EventLog(path)
+    log.append(
+        "research_started",
+        {"research": research.to_dict(), "research_schema": 999},
+        at="t",
+    )
+
+    with pytest.raises(EventValidationError, match="unsupported research schema"):
         replay(read_events(path))
