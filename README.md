@@ -1,39 +1,38 @@
 <h1 align="center">rlm0</h1>
 
-<p align="center"><strong>A Recursive Language Model Runtime That Runs the Control First</strong></p>
+<p align="center"><strong>Recursion Only When It Pays</strong></p>
 
-A recursive language model answers questions about text far larger than its
-context window by holding that text in a REPL and writing code to work over it,
-calling itself on the pieces. The idea works. What nobody ships is any way to
-tell whether the recursion was the part that helped, or what the trajectory
-cost when it did not.
+A recursive language model answers questions about text far bigger than its
+context window. It holds the text in a REPL, writes code to slice and search
+it, and calls itself on the pieces. The technique works, and on some tasks the
+margins are enormous.
 
-rlm0 attempts depth zero first, always. The same environment, the same prompt,
-sub-calls unavailable. It escalates only when that fails. So every run carries
-the counterfactual, and whether recursion earned its cost becomes something the
-run measured rather than something the README claims.
+The trouble is that almost nobody can tell you whether the recursion was the
+part that helped, or what the run cost when it didn't.
+
+rlm0 tries depth zero first: same environment, same prompt, sub-calls switched
+off. It goes deeper only if that fails. Both attempts land in the same record,
+so you can see what recursion bought and what you paid for it.
 
 ## Why this exists
 
-The published result is real and the numbers are large. On OOLONG-Pairs a
-frontier model scores 0.1 F1 and the recursive version reaches 76.0. At six
-million input tokens a task that no context window can hold at all gets
-answered for under a dollar.
+The headline numbers are real. On OOLONG-Pairs a frontier model scores 0.1 F1
+and the recursive version reaches 76.0. At six million input tokens, where no
+context window helps at all, questions get answered for under a dollar.
 
-Underneath those headlines is a quieter finding that the paper states plainly
-and almost nobody repeats. The REPL is what handles length; recursion helps on
-information-dense aggregation. On retrieval work, depth zero wins. An
-independent reproduction found depth two degrading rather than improving, with
-execution time going from 3.6 seconds to 344. A separate critique showed
-recursion actively hurting inside the native window.
+Underneath sits a quieter result that the paper states plainly and few people
+repeat. The REPL is what handles length. Recursion helps on dense aggregation,
+and on ordinary retrieval depth zero simply wins. A reproduction found depth
+two making things worse, with runtime going from 3.6 seconds to 344. Another
+group found recursion hurting outright once the text fits in the window.
 
-The best-engineered open implementation of this idea reports, in its own
-benchmark notes, that every successful run used only the root REPL and never
-recursed at all. Recursion was configured, available, and never chosen.
+The best-engineered open implementation I could find reports, in its own
+benchmark notes, that the model never recursed in any successful run.
+Recursion was configured, available, and never chosen.
 
-So the honest position is that this is a technique with a real and narrow
-regime, and the interesting engineering problem is knowing which regime you are
-in before you pay for the wrong one.
+So this is a technique with a real but narrow sweet spot, and the engineering
+problem is knowing which side of it you are on before you pay for the wrong
+answer.
 
 ## Install
 
@@ -44,8 +43,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.11 or newer. The test suite runs against fakes, so nothing needs an
-API key and no model is called to develop against it.
+Python 3.11 or newer. The tests run against fakes, so you need no API key and
+no model is called to develop against it.
 
 ## What a run looks like
 
@@ -57,50 +56,49 @@ task: which supplier appears in both the Q3 audit and the incident log
   recursion helped: $0.0130, +2.5s, +1 sub-calls
 ```
 
-That last line is the point. It is computed from the two attempts the run
-already holds, not asserted. When depth zero answers, the run stops there and
-reports that recursion was never needed, which is the common case on retrieval
-work and the case existing systems pay for anyway.
+That last line is arithmetic over the two attempts above it. When depth zero
+answers on its own the run stops there and says recursion was never needed,
+which on retrieval work is most of the time.
 
-A `Run` cannot be constructed without its depth-zero control, without every
-model call attributed to the role and depth that issued it, or without the
-budget it executed under. The control can be waived, because a rule with no
-escape gets bypassed rather than obeyed, but a waiver names an approver, needs
-a reason that is actually a reason, and the run reports its verdict as
-untested forever after.
+A `Run` will not construct without its depth-zero attempt, without every model
+call tagged with the role and depth that made it, or without the budget it ran
+under. You can waive the control, because a rule with no escape hatch gets
+worked around instead of followed, but a waiver names an approver, needs a real
+reason, and leaves the verdict reading `untested` from then on.
 
 ## What it refuses to do
 
-Cost is `None` rather than zero when a call could not be priced. Several
-surveyed implementations accumulate unpriced calls as zero, which means their
-budget ceilings can never fire, and a ceiling that silently never triggers is
-worse than no ceiling because it is believed.
+Cost comes back as `None` when a call could not be priced, never as zero.
+Several implementations I read total unpriced calls as zero, which means their
+spending limits can never fire. A limit that quietly never triggers is worse
+than no limit, because people believe it.
 
-Budget is reserved before dispatch rather than counted after. A fan-out that
-checks a counter between calls has already landed half of them.
+Budget is reserved before the call goes out. Counting afterwards bounds
+nothing, and a fan-out that checks between dispatches has already sent half of
+them.
 
-The sandbox keeps the network closed and the credentials outside it. The
-context is attacker-controlled text sharing an interpreter with a model that
-writes code, so injection and execution are one step apart by construction.
-Sub-calls are serviced by the host across the boundary, which is why the
-sandbox never needs a socket or a key.
+The sandbox keeps the network shut and the API keys outside it. Your context is
+attacker-controlled text sharing an interpreter with a model that writes code,
+which puts prompt injection one step from code execution. Sub-calls get
+serviced by the host across that boundary, so nothing inside ever needs a
+socket or a key.
 
 ## Where it stands
 
-The contract and the seams are built and tested. The runtime, the sandbox, the
-providers and the harness are in progress. No benchmark number exists yet,
-honest or otherwise, and none will be published without a depth-zero row beside
-it.
+The contract and the seams are built and tested. The runtime, sandbox,
+providers and harness are in progress. There is no benchmark number yet, and
+there won't be one published without a depth-zero row next to it.
 
 ## Prior work
 
-The idea is from [Recursive Language Models](https://arxiv.org/abs/2512.24601)
-by Alex L. Zhang, Tim Kraska and Omar Khattab at MIT CSAIL, whose reference
-implementation is at [alexzhang13/rlm](https://github.com/alexzhang13/rlm).
-This is a clean-room implementation and shares no code with it.
+The idea comes from [Recursive Language
+Models](https://arxiv.org/abs/2512.24601) by Alex L. Zhang, Tim Kraska and Omar
+Khattab at MIT CSAIL. Their implementation is at
+[alexzhang13/rlm](https://github.com/alexzhang13/rlm). This is a clean-room
+build and shares no code with it.
 
-The design here was shaped by reading twenty open implementations end to end.
-Credited ideas and where they came from are in
+Reading twenty open implementations end to end shaped most of the design
+decisions here. Credits and sources are in
 [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
 
 ## License

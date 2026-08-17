@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "rlm0"
 version = "0.1.0"
-description = "A recursive language model runtime that runs the depth-zero control first and bounds what it spends"
+description = "Recursive language models that try the cheap path first, so you can see what the recursion actually bought you"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
