@@ -103,10 +103,11 @@ __all__ = [
 DEFAULT_MICROVM_RUNTIME: Final = "kata-runtime"
 """Kata Containers, because it is the one usually already registered.
 
-libkrun through `crun --krun` is the same idea with a smaller and faster
-hypervisor, and is what `microsandbox` uses underneath. It is reached from here
-by passing `binary="podman", runtime="krun"`, which is why the runtime is a
-parameter rather than a constant.
+The current backend speaks Docker's runtime-discovery API and reuses Docker's
+containment flags. libkrun and Podman may be viable future backends, but they
+need their own discovery and argv implementation before this package can say
+they work. ``runtime`` remains configurable for Docker installations that
+register a different OCI microVM runtime.
 """
 
 KERNEL_PROBE: Final = "import os; print(os.uname().release)"

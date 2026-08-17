@@ -87,19 +87,9 @@ def test_the_run_line_is_the_docker_one_plus_the_runtime_and_nothing_else() -> N
     assert built == [*base[:2], "--runtime", DEFAULT_MICROVM_RUNTIME, *base[2:]]
 
 
-def test_the_runtime_is_selectable_because_libkrun_is_reached_differently() -> None:
-    argv = microvm_run_argv(
-        binary="podman",
-        runtime="krun",
-        image=DEFAULT_IMAGE,
-        name="rlm0-sbx-test",
-        memory="512m",
-        cpus="1.0",
-        pids_limit=128,
-        tmpfs_size="64m",
-        user="65534:65534",
-    )
-    assert argv[:4] == ["podman", "run", "--runtime", "krun"]
+def test_a_registered_docker_runtime_is_selectable() -> None:
+    argv = _argv("another-oci-microvm-runtime")
+    assert argv[:4] == ["docker", "run", "--runtime", "another-oci-microvm-runtime"]
 
 
 def test_the_runtime_flag_precedes_the_image_and_the_command() -> None:
