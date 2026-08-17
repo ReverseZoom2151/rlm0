@@ -40,14 +40,21 @@ def can_fund_another_attempt(
 ) -> bool:
     """Whether the remaining budget can pay for a whole deeper attempt.
 
-    A granted reservation says one more call is allowed, which is not the same
-    question. A deeper attempt needs at least a root turn and the sub-call it
-    exists to make, so a ceiling with one call left funds a deep attempt that
-    stops before it can differ from the shallow one. Unknown remainders (None)
-    are treated as no objection rather than as zero, because a budget that does
-    not track a dimension is not the same as a budget with none of it left.
+    A deeper attempt needs at least a root turn and the sub-call it exists to
+    make, so a ceiling with one call left funds a deep attempt that stops
+    before it can differ from the shallow one. Unknown remainders (None) are
+    treated as no objection rather than as zero, because a budget that does not
+    track a dimension is not the same as a budget with none of it left.
+
+    `Budget.remaining()` returns `granted=False` because it takes nothing. A
+    refused reservation also returns `granted=False`, so the two cases need a
+    named distinction: a read carries the exact "query only" reason, while a
+    refusal carries the reason a real reservation was denied. The headroom
+    fields then decide whether the read can fund another attempt.
     """
-    if not reservation.granted:
+    is_read = reservation.reason == "query only, nothing reserved"
+    is_unbounded_read = reservation.reason.startswith("unbounded:")
+    if not reservation.granted and not (is_read or is_unbounded_read):
         return False
     calls = reservation.calls_remaining
     if calls is not None and calls < min_calls:

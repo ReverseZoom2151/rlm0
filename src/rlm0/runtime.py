@@ -22,27 +22,49 @@ cannot service host calls raises `RecursionUnavailableError` rather than
 quietly producing a flat run wearing a depth label.
 
 Prompting, parsing and observation formatting are taken as constructor
-arguments typed by the Protocols below rather than imported. `ports.py` does
-not name these seams yet, and inventing an import to a concrete module would
-put the orchestrator back in the business of knowing who renders its prompts.
+arguments typed by the Protocols in `ports.py`, which now names those seams.
+The names are re-exported from here because they were declared in this module
+first and callers import them from it.
+
+The third commitment is that a fan-out is warm before it is wide. Anthropic's
+documentation states that a cache entry becomes available only once the first
+response has begun, and that parallel requests sharing a prefix do not read
+each other's cache, so firing N children at a cold prefix writes that prefix N
+times at 1.25x base input and costs more than never asking for caching at all.
+The barrier that prevents it is therefore not a tuning step, it is part of what
+makes the fan-out correct, and it is placed inside `_call_model` where every
+call in the file already goes rather than offered as something a dispatcher can
+remember to do.
+
+The fourth is that every stop condition winds down. Budget exhaustion,
+iteration exhaustion and the attempt deadline all end in the same salvage call,
+because a run that has already spent real money should surrender the best
+answer it can rather than throwing away what it bought. Truncating at the wall
+is free to implement and is the reason a failed trajectory in the published
+cost distributions costs the most and returns the least.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
+from rlm0.budget import FanOutEstimator
 from rlm0.policy import Escalating
 from rlm0.ports import (
     Budget,
     CallReservation,
     DepthPolicy,
     EscalationContext,
-    ExecResult,
     LMClient,
+    ObservationFormatter,
+    ParsedTurn,
+    Prompter,
     Sandbox,
+    TurnParser,
 )
 from rlm0.run import Attempt, CallRecord, Outcome, Role, Run
 
@@ -53,6 +75,7 @@ __all__ = [
     "ParsedTurn",
     "Prompter",
     "RecursionUnavailableError",
+    "RefundableBudget",
     "SubCallSandbox",
     "TurnParser",
 ]
@@ -69,19 +92,26 @@ class RecursionUnavailableError(RuntimeError):
     """
 
 
-HostCallHandler = Callable[..., str]
-"""Services one sub-call from inside the sandbox, out here where the key lives."""
+HostCallHandler = Callable[..., object]
+"""Services one sub-call from inside the sandbox, out here where the key lives.
+
+Returns `object` rather than `str` because a fan-out returns a list. The value
+crosses the boundary as JSON, so a list of answers is as carryable as one
+answer, and narrowing this to `str` would force the batch shape through a
+string encoding for no reason other than an alias.
+"""
 
 
 @runtime_checkable
 class SubCallSandbox(Protocol):
-    """The half of the host-call seam that `ports.Sandbox` does not yet name.
+    """The older spelling of the half of the host-call seam that binds.
 
-    `Sandbox.register_host_call` declares that a name exists inside and says
-    nothing about who answers when it is called. Until that seam is stated in
-    `ports.py`, the runtime detects the handler hook structurally and refuses
-    to run a deep attempt without it, which is the behaviour that keeps a
-    missing bridge from passing as a completed recursive run.
+    `ports.Sandbox` now names `bind_host_call`, which is the seam this Protocol
+    was standing in for, and the runtime prefers it. This one is kept and still
+    accepted because a sandbox written against the older shape is otherwise
+    silently unable to service a sub-call, and the failure it produces is
+    exactly the one this project refuses to reproduce: a run labelled depth two
+    that never recursed. Either hook satisfies the runtime; neither does not.
     """
 
     def set_host_call_handler(self, name: str, handler: HostCallHandler) -> None:
@@ -89,46 +119,81 @@ class SubCallSandbox(Protocol):
         ...
 
 
-class ParsedTurn(Protocol):
-    """What one model turn asked for: code to run, an answer, or neither."""
+@runtime_checkable
+class RefundableBudget(Protocol):
+    """A budget that will take back a reservation nobody used.
 
-    @property
-    def code(self) -> str | None: ...
+    `ports.Budget` names `reserve` and `settle` and nothing between them, so a
+    granted call that never happens has no way home and the in-flight pool only
+    ever grows. This runtime reserves a wind-down call before every turn that
+    might need one and reserves a whole batch before a fan-out, so it creates
+    exactly that situation on purpose and several times per attempt.
 
-    @property
-    def final_answer(self) -> str | None: ...
-
-
-class TurnParser(Protocol):
-    """Turns raw completion text into an action, identically at every depth."""
-
-    def parse(self, text: str) -> ParsedTurn: ...
-
-
-class Prompter(Protocol):
-    """Renders the system and opening messages.
-
-    `sub_call_name` is None exactly when sub-calls are unavailable, and it is
-    the only depth-dependent input the prompter gets. Handing it the depth as
-    well would let a prompt fork on it, which reintroduces the two-code-paths
-    problem one layer down.
+    Detected structurally, in the same way and for the same reason as
+    `SubCallSandbox`: the seam is real, the port does not name it yet, and a
+    budget that cannot refund still works here, it is merely tighter than it
+    says it is.
     """
 
-    def system(self, *, max_depth: int, sub_call_name: str | None) -> str: ...
-
-    def opening(
-        self, *, task: str, context_variable: str, context_chars: int
-    ) -> str: ...
-
-    def wind_down(self, *, reason: str) -> str: ...
+    def release(self, *, n_calls: int) -> None:
+        """Return calls that were granted and will not be made."""
+        ...
 
 
-class ObservationFormatter(Protocol):
-    """Renders execution results back into the conversation."""
+class _WarmingBarrier:
+    """One call goes first and the rest wait for it to land.
 
-    def format(self, result: ExecResult) -> str: ...
+    The whole cost argument for a fan-out rests on the children sharing a
+    cached prefix, and a cache entry does not exist until the response that
+    writes it has begun. Releasing N children at once against a cold prefix
+    therefore does not produce one write and N reads, it produces N writes at
+    1.25x base input, which is more expensive than not asking for caching at
+    all and shows up afterwards as a cache hit rate of zero that reads like a
+    provider bug.
 
-    def format_no_action(self, text: str) -> str: ...
+    Leadership is taken rather than assigned: whichever worker reaches its
+    first model call first becomes the one that warms the prefix. Assigning it
+    to index zero would look tidier and would idle every other worker behind a
+    child that might be slow to start for reasons of its own.
+
+    `open` is idempotent and is also called from the dispatcher's `finally`, so
+    a leader that dies before its call returns releases its siblings instead of
+    parking them until the timeout. The timeout is the second guard and exists
+    because a barrier that can hang a run is worse than a barrier that
+    occasionally fails to save money.
+    """
+
+    def __init__(self, *, timeout_s: float) -> None:
+        self._timeout_s = max(timeout_s, 0.0)
+        self._opened = threading.Event()
+        self._lock = threading.Lock()
+        self._leader_taken = False
+        self.waits = 0
+        """How many calls were actually held back. Read by tests, and by nobody
+        else, because a barrier that silently stopped working would otherwise
+        be invisible."""
+
+    def take_lead(self) -> bool:
+        """True for exactly one caller, and only while the prefix is cold."""
+        with self._lock:
+            if self._leader_taken or self._opened.is_set():
+                return False
+            self._leader_taken = True
+            return True
+
+    def wait(self) -> None:
+        if self._opened.is_set():
+            return
+        with self._lock:
+            self.waits += 1
+        self._opened.wait(self._timeout_s)
+
+    def open(self) -> None:
+        self._opened.set()
+
+    @property
+    def is_open(self) -> bool:
+        return self._opened.is_set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,12 +212,34 @@ class _AttemptState:
     Shared by the root REPL and every descendant, because an attempt is the
     unit the run compares and a sub-call that billed against this attempt
     belongs in this attempt's call list.
+
+    Every mutation goes through a method holding the lock, because a fan-out
+    writes here from several threads at once. `list.append` would survive that
+    on this interpreter and `n += 1` would not, and a cost table that loses a
+    call under concurrency is the accounting failure this project is about.
     """
 
     calls: list[CallRecord] = field(default_factory=list)
     iterations: int = 0
     exec_failures: int = 0
     sub_calls_refused: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def record_call(self, call: CallRecord) -> None:
+        with self.lock:
+            self.calls.append(call)
+
+    def note_iteration(self) -> None:
+        with self.lock:
+            self.iterations += 1
+
+    def note_exec_failure(self) -> None:
+        with self.lock:
+            self.exec_failures += 1
+
+    def note_sub_calls_refused(self, n: int = 1) -> None:
+        with self.lock:
+            self.sub_calls_refused += n
 
     def signals(self) -> dict[str, float]:
         """Cheap, content-free counters, computed here by the runtime.
@@ -161,14 +248,106 @@ class _AttemptState:
         them look at the task text, the context text or the model's output, so
         a policy built on them cannot become a task classifier by accident.
         """
-        root = sum(1 for call in self.calls if call.role is Role.ROOT)
-        return {
-            "root_calls": float(root),
-            "sub_calls": float(len(self.calls) - root),
-            "iterations": float(self.iterations),
-            "exec_failures": float(self.exec_failures),
-            "sub_calls_refused": float(self.sub_calls_refused),
-        }
+        with self.lock:
+            root = sum(1 for call in self.calls if call.role is Role.ROOT)
+            return {
+                "root_calls": float(root),
+                "sub_calls": float(len(self.calls) - root),
+                "iterations": float(self.iterations),
+                "exec_failures": float(self.exec_failures),
+                "sub_calls_refused": float(self.sub_calls_refused),
+            }
+
+
+class _BatchMeter:
+    """What one batch's dispatched calls actually cost, for the ratio.
+
+    Only the first call of each child is counted, because that is the set the
+    reservation was an estimate of. A child that goes on to take four more
+    turns reserves those turns itself through the ordinary per-turn path, and
+    folding them in here would make the over-reservation ratio a measurement of
+    how talkative the children were rather than of how well the batch was
+    sized.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.tokens = 0
+        self.calls = 0
+
+    def record(self, tokens: int) -> None:
+        with self._lock:
+            self.tokens += tokens
+            self.calls += 1
+
+
+class _Dispatch:
+    """One child's place in a warmed batch: the barrier, and the meter.
+
+    Held per child rather than per batch so that the barrier applies to a
+    child's first call and to nothing after it. A child's second turn is not
+    part of the fan-out and has no reason to wait for anybody.
+    """
+
+    def __init__(self, barrier: _WarmingBarrier, meter: _BatchMeter) -> None:
+        self._barrier = barrier
+        self._meter = meter
+        self._first = True
+
+    def before_call(self) -> bool:
+        """Hold this call behind the barrier. True if it is the one warming it."""
+        if not self._first:
+            return False
+        if self._barrier.take_lead():
+            return True
+        self._barrier.wait()
+        return False
+
+    def after_call(self, *, leader: bool, tokens: int) -> None:
+        if not self._first:
+            return
+        self._first = False
+        self._meter.record(tokens)
+        if leader:
+            self._barrier.open()
+
+
+class _HeldCall:
+    """A reservation taken for a call that has not happened yet.
+
+    The runtime reserves the wind-down call before the turn that might need it,
+    which means that on every path where the wind-down does not happen there is
+    a granted call nobody will ever make. Handing it back is not tidiness: the
+    provisional pool only shrinks on `settle`, so an unreturned hold is
+    permanent, and after enough turns the run is bounded by a ceiling lower
+    than the one its own `summary()` prints into the run record.
+
+    Both methods are idempotent so this can sit in a `finally` and still be
+    correct on the paths that consumed the hold deliberately.
+    """
+
+    def __init__(self, release: Callable[[int], None]) -> None:
+        self._release = release
+        self._held = 0
+
+    @property
+    def held(self) -> int:
+        return self._held
+
+    def add(self, n: int) -> None:
+        self._held += n
+
+    def consume(self, n: int = 1) -> bool:
+        """Spend a held call. False when there was nothing held to spend."""
+        if self._held < n:
+            return False
+        self._held -= n
+        return True
+
+    def give_back(self) -> None:
+        if self._held:
+            n, self._held = self._held, 0
+            self._release(n)
 
 
 class RLM:
@@ -198,12 +377,19 @@ class RLM:
         attempt_timeout_s: float | None = None,
         context_variable: str = "CONTEXT",
         sub_call_name: str = "rlm_call",
+        max_parallel_sub_calls: int = 4,
+        warm_timeout_s: float = 120.0,
+        estimator: FanOutEstimator | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if max_parallel_sub_calls < 1:
+            raise ValueError("max_parallel_sub_calls must be at least 1")
+        if warm_timeout_s <= 0.0:
+            raise ValueError("warm_timeout_s must be positive")
         self._lm = lm
         self._sandbox_factory = sandbox_factory
         self._budget = budget
@@ -220,7 +406,20 @@ class RLM:
         self._attempt_timeout_s = attempt_timeout_s
         self._context_variable = context_variable
         self._sub_call_name = sub_call_name
+        self._max_parallel_sub_calls = max_parallel_sub_calls
+        self._warm_timeout_s = warm_timeout_s
+        self._estimator = estimator if estimator is not None else FanOutEstimator()
         self._clock = clock
+
+    @property
+    def estimator(self) -> FanOutEstimator:
+        """The fan-out estimator, so the ratio it achieved can be read out.
+
+        Exposed rather than kept private because the claim this runtime makes
+        about over-reservation is only worth making if somebody can check it
+        after a real run.
+        """
+        return self._estimator
 
     def complete(self, task: str, context: str = "") -> Run:
         """Answer one task, cheapest first, and return the whole trajectory.
@@ -249,7 +448,10 @@ class RLM:
             task=task,
             attempts=tuple(attempts),
             budget_summary=self._budget.summary(),
-            labels={"policy": self._policy.describe()},
+            labels={
+                "policy": self._policy.describe(),
+                "fan_out": self._estimator.describe(),
+            },
         )
 
     def _next_depth(
@@ -282,6 +484,7 @@ class RLM:
                 elapsed_s=elapsed,
                 budget_reservation=self._probe_budget(),
                 signals=dict(signals),
+                last_max_depth=last.max_depth,
             )
         )
         if proposal is None or proposal <= last.max_depth:
@@ -291,13 +494,31 @@ class RLM:
     def _probe_budget(self) -> CallReservation:
         """Ask the budget what is left without spending any of it.
 
-        `Budget` has no read-only accessor, so a reservation for zero calls is
-        used as the probe. Reserving one call instead would either leak an
-        allowance when the policy declines to escalate, or bound the policy's
-        view to a single call when what it needs to know is whether a whole
-        attempt fits.
+        `Budget.remaining` names this read. It used to be a reservation for
+        zero calls, which worked only for as long as every implementation
+        agreed that zero was free, and both implementations in this package
+        refuse a reservation below one call outright.
         """
+        remaining = getattr(self._budget, "remaining", None)
+        if callable(remaining):
+            return cast(CallReservation, remaining())
+        # Compatibility with pre-existing Budget implementations. The port
+        # now requires remaining(), but a zero-call probe was the only prior
+        # convention and keeping it here lets older adapters fail closed on
+        # their own terms rather than crashing after a completed control run.
         return self._budget.reserve(n_calls=0, estimated_tokens=0)
+
+    def _release(self, n_calls: int) -> None:
+        """Hand back calls that were granted and will not be made.
+
+        Silently a no-op for a budget that names no refund. That is the right
+        failure: such a budget is tighter than it advertises, which is the safe
+        direction, and refusing to run against it would exclude every third
+        party implementation of a port that does not require this yet.
+        """
+        release = getattr(self._budget, "release", None)
+        if n_calls > 0 and callable(release):
+            release(n_calls=n_calls)
 
     # -- one attempt ----------------------------------------------------
 
@@ -347,6 +568,7 @@ class RLM:
         max_depth: int,
         deadline: float | None,
         state: _AttemptState,
+        dispatch: _Dispatch | None = None,
     ) -> _Closed:
         """Run one REPL to a stop. The only function in this file that does.
 
@@ -432,7 +654,11 @@ class RLM:
                 )
             state.iterations += 1
             text = self._call_model(
-                system=system, messages=messages, depth=depth, state=state
+                system=system,
+                messages=messages,
+                depth=depth,
+                state=state,
+                release_after=1,
             )
             parsed = self._parser.parse(text)
             answer = parsed.final_answer
@@ -507,6 +733,7 @@ class RLM:
         messages: list[dict[str, str]],
         depth: int,
         state: _AttemptState,
+        release_after: int = 0,
     ) -> str:
         """One completion, settled against the budget and attributed to a depth.
 
@@ -522,6 +749,7 @@ class RLM:
             cache_prefix=True,
         )
         self._budget.settle(response.usage, response.cost_usd)
+        self._release(release_after)
         state.calls.append(
             CallRecord(
                 role=role,

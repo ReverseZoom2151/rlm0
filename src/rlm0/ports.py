@@ -16,6 +16,7 @@ cost makes the run-level accounting a fiction.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -25,11 +26,17 @@ __all__ = [
     "Budget",
     "CallReservation",
     "DepthPolicy",
+    "EscalationContext",
     "ExecResult",
+    "HostCallable",
     "LMClient",
     "LMResponse",
+    "ObservationFormatter",
+    "ParsedTurn",
+    "Prompter",
     "Sandbox",
     "SandboxUnavailableError",
+    "TurnParser",
 ]
 
 
@@ -119,6 +126,21 @@ class ExecResult:
     """
 
 
+HostCallable = Callable[..., object]
+"""The host side of one sub-call: what actually answers when the guest calls.
+
+Deliberately returning `object` rather than `str`. The value crosses the
+boundary as JSON, so the guest can receive anything JSON can carry, and
+narrowing this to `str` here would make the port a lie about a wire that
+already carries numbers and lists.
+
+Spelled again here rather than imported from `rlm0.sandbox.protocol` because
+the dependency runs the other way: the sandbox package imports this module.
+The two aliases are the same type, so an implementation written against either
+satisfies both.
+"""
+
+
 @runtime_checkable
 class Sandbox(Protocol):
     """Somewhere to run code the model wrote, that the model cannot escape.
@@ -152,6 +174,33 @@ class Sandbox(Protocol):
 
         The implementation marshals the call back out; it does not hand the
         sandbox the means to make it.
+
+        `arity` is exact: an implementation is entitled to reject a call made
+        with a different number of arguments, because a shim that quietly
+        accepts any shape turns a wiring mistake into a wrong answer. Pass a
+        negative arity to mean variadic, for the case where the host handler
+        genuinely accepts several shapes.
+
+        Bind before you register. A name exposed inside the sandbox with
+        nothing behind it fails where the model reads the failure as its own
+        mistake, so implementations may refuse to register an unbound name.
+        """
+        ...
+
+    def bind_host_call(self, name: str, function: HostCallable) -> None:
+        """Give the host the callable that answers `name`.
+
+        The other half of the seam, and the half that was missing. Without it
+        `register_host_call` declares that a name exists inside the sandbox and
+        says nothing about who answers when it is called, so the runtime had no
+        typed way to service a sub-call and detected the hook structurally
+        instead. That is exactly how an implementation ends up shipping a
+        recursion path that is unreachable in one environment and nobody
+        notices.
+
+        This is the seam that keeps the credential outside. What crosses the
+        boundary is a name and an arity; the callable, the API key and the
+        socket all stay on this side.
         """
         ...
 
@@ -195,6 +244,24 @@ class Budget(Protocol):
         """Record what a granted call actually consumed."""
         ...
 
+    def remaining(self) -> CallReservation:
+        """What is left, taking none of it.
+
+        Added because without it there is no non-consuming read on this port,
+        and a caller that needs one (the depth policy, which must know whether
+        a whole further attempt fits) has to invent a convention. The
+        convention that appeared was a reservation for zero calls, which only
+        works if every implementation agrees that zero is free, and `RunBudget`
+        does not: it rejects a reservation below one call outright. A shared
+        convention that one implementation rejects is a crash waiting for the
+        second implementation, so the read is named here instead.
+
+        Returned as a `CallReservation` with `granted` False so that a caller
+        which already knows how to render a refusal can render this too. False
+        here means nothing was taken, not that nothing could be.
+        """
+        ...
+
     def summary(self) -> str:
         """One line naming the ceilings, for the run record."""
         ...
@@ -223,6 +290,19 @@ class EscalationContext:
     elapsed_s: float
     budget_reservation: CallReservation
     signals: dict[str, float] = field(default_factory=dict)
+    last_max_depth: int | None = None
+    """The depth bound the previous attempt actually ran under.
+
+    `attempts_so_far` counts rungs and says nothing about how high they were,
+    so a policy that wants to step from where the run really is has to
+    reconstruct the ladder from its own configuration and hope the two agree.
+    They do not have to: a caller can seed the first attempt from a resumed
+    run, and a policy that assumed attempt n implies bound n then proposes a
+    bound the run has already exceeded, which `Run` refuses at construction.
+
+    Optional, and None means the caller did not say, because this field arrived
+    after the policies that read this context were written.
+    """
 
 
 @runtime_checkable
@@ -247,4 +327,101 @@ class DepthPolicy(Protocol):
 
     def describe(self) -> str:
         """Name the policy, for the run record."""
+        ...
+
+
+class ParsedTurn(Protocol):
+    """What one model turn asked for: code to run, an answer, or neither.
+
+    A view rather than a data type. `rlm0.parse` returns a much richer object,
+    carrying every fenced block with its offsets and the reason a directive was
+    refused, and that richness belongs to whoever is reporting on parsing
+    quality. What the loop needs is two questions answered, and stating only
+    those two here is what lets a different parser be dropped in without the
+    orchestrator learning what a code fence is.
+    """
+
+    @property
+    def code(self) -> str | None:
+        """The code to run, or None when this turn asked for nothing to run."""
+        ...
+
+    @property
+    def final_answer(self) -> str | None:
+        """The answer, already resolved, or None.
+
+        Already resolved is the load-bearing part. A parser that can name a
+        REPL variable as the answer must have read that variable out before it
+        gets here, because the loop has no way to tell a variable name from an
+        answer that happens to look like one.
+        """
+        ...
+
+
+class TurnParser(Protocol):
+    """Turns raw completion text into an action, identically at every depth.
+
+    One method and no depth argument, on purpose. The depth-zero attempt is the
+    control only if it went through the same parser, so a parser that could be
+    told which attempt it was serving would be the first place the control
+    quietly stopped being one.
+
+    Implementations that need conversation state, such as whether any code has
+    run yet in this attempt, have to track it themselves. That is a real cost
+    and it is the price of not handing the parser the loop's state to reach
+    into.
+    """
+
+    def parse(self, text: str) -> ParsedTurn: ...
+
+
+class Prompter(Protocol):
+    """Renders the system and opening messages.
+
+    `sub_call_name` is None exactly when sub-calls are unavailable, and it is
+    the only depth-dependent input the prompter gets. Handing it the depth as
+    well would let a prompt fork on it, which reintroduces one layer down the
+    two-code-paths problem that makes a control stop being a control.
+    """
+
+    def system(self, *, max_depth: int, sub_call_name: str | None) -> str:
+        """The system prompt for one attempt at one depth."""
+        ...
+
+    def opening(
+        self, *, task: str, context_variable: str, context_chars: int
+    ) -> str:
+        """The first user message.
+
+        Gets the size of the context and the name it is bound to, and never the
+        context itself. That signature is the guarantee: a prompter cannot leak
+        a context it was never handed.
+        """
+        ...
+
+    def wind_down(self, *, reason: str) -> str:
+        """The message that asks for whatever the model has, and why.
+
+        Reached when the budget refused the next call. The reason is passed
+        through to the model because a model told what stopped it writes a
+        different last turn from one that is simply cut off.
+        """
+        ...
+
+
+class ObservationFormatter(Protocol):
+    """Renders execution results back into the conversation.
+
+    The one channel from the environment into the window, so its size is the
+    design rather than a detail. An implementation that renders the whole of
+    stdout turns the REPL into a delivery mechanism for the context and
+    collapses the architecture into one very long single-shot prompt.
+    """
+
+    def format(self, result: ExecResult) -> str:
+        """One execution, as the model should see it."""
+        ...
+
+    def format_no_action(self, text: str) -> str:
+        """The reply to a turn that ran nothing and answered nothing."""
         ...

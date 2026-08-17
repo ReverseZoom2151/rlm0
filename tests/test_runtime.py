@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
 import pytest
 
@@ -26,6 +27,7 @@ from rlm0.ports import (
     EscalationContext,
     ExecResult,
     LMResponse,
+    Sandbox,
 )
 from rlm0.run import Outcome, Role, TokenUsage, Verdict
 from rlm0.runtime import RLM, HostCallHandler, RecursionUnavailableError
@@ -100,7 +102,7 @@ class FakeSandbox:
                     variables=tuple(self.variables),
                 )
             return ExecResult(
-                stdout=handler(query, handle),
+                stdout=cast(str, handler(query, handle)),
                 stderr="",
                 wall_clock_s=0.01,
                 ok=True,
@@ -187,6 +189,21 @@ class FakeBudget:
     def settle(self, usage: TokenUsage, cost_usd: float | None) -> None:
         self.used += 1
         self.settled += 1
+
+    def release(self, *, n_calls: int) -> None:
+        # The fake tracks only settled calls, so an unused hold never changed
+        # its ledger. Presenting the method keeps it structurally compatible
+        # with the real budget without inventing a second ledger in a fixture.
+        if n_calls < 1:
+            raise ValueError("n_calls must be positive")
+
+    def remaining(self) -> CallReservation:
+        remaining = self.calls_allowed - self.used
+        return CallReservation(
+            granted=False,
+            reason="query only, nothing reserved",
+            calls_remaining=remaining,
+        )
 
     def summary(self) -> str:
         return f"max {self.calls_allowed} calls"
@@ -318,7 +335,7 @@ def build(
 
     rlm = RLM(
         lm=lm,
-        sandbox_factory=factory,
+        sandbox_factory=cast(Callable[[], Sandbox], factory),
         budget=budget,
         prompter=prompter,
         parser=parser,
@@ -527,7 +544,7 @@ def test_recursion_reaches_depth_two_when_the_bound_allows_it() -> None:
 def test_a_sandbox_that_cannot_service_sub_calls_refuses_loudly() -> None:
     rlm = RLM(
         lm=FakeLM(responder=scripted({"ROOT": ["CODE: NOOP"]})),
-        sandbox_factory=DeafSandbox,
+        sandbox_factory=cast(Callable[[], Sandbox], DeafSandbox),
         budget=FakeBudget(),
         prompter=FakePrompter(),
         parser=FakeParser(),
@@ -592,8 +609,9 @@ def test_the_policy_sees_a_reservation_that_cost_nothing_to_take() -> None:
     harness.rlm.complete("ROOT question")
 
     assert len(seen) == 1
-    assert seen[0].granted
-    assert 0 in harness.budget.reservations
+    assert not seen[0].granted
+    assert seen[0].reason == "query only, nothing reserved"
+    assert 0 not in harness.budget.reservations
     assert harness.budget.settled == 1
 
 

@@ -25,6 +25,18 @@ plus what is already in flight, and either provisionally debits the whole batch
 or refuses it whole. `settle` then reconciles the provisional debit against
 what actually happened.
 
+A reservation is only as good as the estimate behind it, which is why
+`FanOutEstimator` lives here rather than in the runtime. The published budget
+work concedes four to six times static over-reservation and a little over two
+times for its adaptive variant, and it concedes that because it is estimating
+from outside: it does not know how many calls are about to be issued or how
+much text each of them carries. A runtime that has just decided to fan out over
+eleven slices knows both numbers exactly, and knows the tokens-per-character
+that this run's own settled calls have been showing. Estimating from those
+three facts plus the model's output ceiling is not a cleverer heuristic, it is
+a better-informed one, and the estimator records the ratio it actually achieved
+so the improvement is a measurement rather than another claim.
+
 Refusal is a signal rather than an exception. The runtime that gets refused
 tells the model what is left and winds down to a final answer, which is a
 strictly better outcome than an exception unwinding a tree that was halfway to
@@ -39,7 +51,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from rlm0.ports import CallReservation
@@ -47,6 +59,8 @@ from rlm0.run import TokenUsage
 
 __all__ = [
     "BudgetSnapshot",
+    "FanOutEstimate",
+    "FanOutEstimator",
     "RunBudget",
     "Unbounded",
 ]
@@ -76,6 +90,8 @@ class BudgetSnapshot:
     unpriced_calls: int
     unmatched_settlements: int
     elapsed_s: float
+    calls_released: int = 0
+    unmatched_releases: int = 0
 
     @property
     def calls_used(self) -> int:
@@ -192,6 +208,8 @@ class RunBudget:
         self._usd_pending = 0.0
         self._unpriced_calls = 0
         self._unmatched_settlements = 0
+        self._calls_released = 0
+        self._unmatched_releases = 0
         self._warned_unpriced = False
 
     # -- the reservation -------------------------------------------------
@@ -290,6 +308,56 @@ class RunBudget:
             else:
                 self._usd_settled += cost_usd
 
+    def release(self, *, n_calls: int) -> None:
+        """Give back calls that were granted and will never be made.
+
+        The missing third verb. Reserve and settle alone cannot describe a
+        caller that reserves two calls for one turn, holding the second so a
+        wind-down is always fundable, and then makes only one of them: the
+        unused half stays in flight forever, every ceiling is tested against
+        it, and the run ends up bounded by something lower than the number
+        `summary()` prints into the run record. The published budget lifecycle
+        this project cites is reserve, reconcile and refund for exactly this
+        reason.
+
+        An explicit release rather than a reservation handle threaded through
+        `settle`. Handles were the other candidate and they are strictly more
+        precise, since each settlement would then release its own reservation's
+        share rather than an equal one. They were rejected because `settle` is
+        on the `Budget` port and is called from the provider-facing edge of the
+        runtime, so adding a handle changes every implementation and every call
+        site to fix a case that only the reserving caller can even detect. The
+        caller that took the hold is the one that knows it went unused, so the
+        refund belongs where that knowledge is.
+
+        No token argument, for the reason `settle` gives: the provisional pool
+        is shared and released in equal per-call shares, because nothing here
+        can tell which reservation a given call belonged to. Releasing a call
+        returns its share of what is still pending, which is the same
+        arithmetic a settlement does, minus the spend.
+        """
+        if n_calls < 1:
+            raise ValueError(f"a release must cover at least one call, got {n_calls}")
+        with self._lock:
+            if self._calls_in_flight <= 0:
+                # Releasing what was never held would credit the run with
+                # headroom nobody reserved, which is a ceiling that reads as
+                # enforced and is not. Counted, not applied.
+                self._unmatched_releases += n_calls
+                return
+            returned = min(n_calls, self._calls_in_flight)
+            share_tokens = self._tokens_pending / self._calls_in_flight * returned
+            share_usd = self._usd_pending / self._calls_in_flight * returned
+            self._calls_in_flight -= returned
+            self._tokens_pending -= share_tokens
+            self._usd_pending -= share_usd
+            self._calls_released += returned
+            if self._calls_in_flight == 0:
+                self._tokens_pending = 0.0
+                self._usd_pending = 0.0
+            if returned < n_calls:
+                self._unmatched_releases += n_calls - returned
+
     # -- what the runtime asks ------------------------------------------
 
     @property
@@ -343,6 +411,8 @@ class RunBudget:
                 unpriced_calls=self._unpriced_calls,
                 unmatched_settlements=self._unmatched_settlements,
                 elapsed_s=self._elapsed_locked(),
+                calls_released=self._calls_released,
+                unmatched_releases=self._unmatched_releases,
             )
 
     def summary(self) -> str:
@@ -370,7 +440,9 @@ class RunBudget:
             )
             flags = ""
             if self._unmatched_settlements:
-                flags = f", {self._unmatched_settlements} unreserved settlements"
+                flags += f", {self._unmatched_settlements} unreserved settlements"
+            if self._unmatched_releases:
+                flags += f", {self._unmatched_releases} unheld releases"
             return f"RunBudget[shared] {ceilings} ({spent}{flags})"
 
     # -- internals, all called with the lock held ------------------------
@@ -509,6 +581,204 @@ class RunBudget:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FanOutEstimate:
+    """How many tokens a batch is expected to need, and what said so.
+
+    `basis` names where the tokens-per-character came from, because an estimate
+    derived from this run's own settled calls and one derived from a shipped
+    prior are the same number with very different standing, and a ratio
+    reported without saying which one produced it cannot be read.
+    """
+
+    n_calls: int
+    tokens: int
+    input_tokens: int
+    output_tokens: int
+    tokens_per_char: float
+    output_tokens_per_call: float
+    basis: str
+
+    def describe(self) -> str:
+        return (
+            f"{self.n_calls} call(s), ~{self.tokens} tokens "
+            f"({self.input_tokens} in + {self.output_tokens} out) at "
+            f"{self.tokens_per_char:.3f} tokens/char [{self.basis}]"
+        )
+
+
+class FanOutEstimator:
+    """Sizes a batch reservation from what the dispatcher already knows.
+
+    Four inputs, all available at the moment of dispatch and none of them a
+    guess about the future:
+
+    - the batch size, because the runtime has already decided how many children
+      it is about to issue;
+    - the characters going into each child, which is the shared prefix plus the
+      slice that child was handed, and the slice is the thing the runtime just
+      cut;
+    - the tokens-per-character this run has actually been billed at, measured
+      over calls that have already settled with provider-reported counts;
+    - the model's output ceiling, which is a hard cap that no call can exceed.
+
+    The output term is where a static estimator loses most of its accuracy. It
+    has to assume every call runs to the ceiling, because it has no way to know
+    better, and a 4096-token ceiling against a 300-token answer is a twelvefold
+    error on that half of the estimate on its own. Here the mean observed output
+    is used once there is anything to observe, and the ceiling is kept only as
+    the cap it really is.
+
+    `headroom` is applied last and is deliberately small. It exists because an
+    estimate that lands under the truth turns a shared ceiling into an overshoot
+    on the calls already in flight, which is the one error this module is not
+    allowed to make. It is not a substitute for estimating well.
+    """
+
+    def __init__(
+        self,
+        *,
+        prior_tokens_per_char: float = 0.28,
+        prior_output_fraction: float = 0.35,
+        headroom: float = 1.2,
+        min_samples: int = 2,
+    ) -> None:
+        if prior_tokens_per_char <= 0.0:
+            raise ValueError("prior_tokens_per_char must be positive")
+        if not 0.0 < prior_output_fraction <= 1.0:
+            raise ValueError("prior_output_fraction must be in (0.0, 1.0]")
+        if headroom < 1.0:
+            raise ValueError(
+                "headroom below 1.0 estimates deliberately low, which spends a "
+                "shared ceiling it did not reserve"
+            )
+        if min_samples < 1:
+            raise ValueError("min_samples must be at least 1")
+        self.prior_tokens_per_char = prior_tokens_per_char
+        self.prior_output_fraction = prior_output_fraction
+        self.headroom = headroom
+        self.min_samples = min_samples
+
+        self._lock = threading.Lock()
+        self._samples = 0
+        self._observed_chars = 0
+        self._observed_input = 0
+        self._observed_output = 0
+        self._reserved_tokens = 0
+        self._actual_tokens = 0
+        self._batches = 0
+
+    # -- learning from this run ------------------------------------------
+
+    def observe(self, *, prompt_chars: int, usage: TokenUsage) -> None:
+        """Fold one settled call into the run's own rate.
+
+        Billed input over prompt characters, rather than uncached input over
+        them. A cached call is billed for the same prefix at a different price,
+        not for fewer tokens, so measuring against the uncached field alone
+        would make the rate fall as the cache warmed and would then
+        under-reserve exactly when a fan-out is widest.
+        """
+        if prompt_chars < 0:
+            raise ValueError("prompt_chars cannot be negative")
+        with self._lock:
+            self._samples += 1
+            self._observed_chars += prompt_chars
+            self._observed_input += usage.billed_input
+            self._observed_output += usage.output_tokens
+
+    def estimate(
+        self,
+        *,
+        batch_size: int,
+        shared_prefix_chars: int,
+        slice_chars: Sequence[int],
+        max_output_tokens: int,
+    ) -> FanOutEstimate:
+        """Size one batch, before any of it is dispatched."""
+        if batch_size < 1:
+            raise ValueError("a batch covers at least one call")
+        if max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be positive")
+        if len(slice_chars) not in (0, batch_size):
+            raise ValueError(
+                f"got {len(slice_chars)} slice sizes for a batch of "
+                f"{batch_size}; a per-child estimate needs one size per child "
+                "or none at all"
+            )
+        if any(n < 0 for n in slice_chars):
+            raise ValueError("slice sizes cannot be negative")
+
+        with self._lock:
+            enough = self._samples >= self.min_samples and self._observed_chars > 0
+            if enough:
+                rate = self._observed_input / self._observed_chars
+                out_each = self._observed_output / self._samples
+                basis = f"observed over {self._samples} settled call(s)"
+            else:
+                rate = self.prior_tokens_per_char
+                out_each = self.prior_output_fraction * max_output_tokens
+                basis = "prior, nothing settled yet"
+        out_each = min(out_each, float(max_output_tokens))
+        sizes = list(slice_chars) if slice_chars else [0] * batch_size
+        in_chars = sum(shared_prefix_chars + size for size in sizes)
+        input_tokens = math.ceil(in_chars * rate * self.headroom)
+        output_tokens = math.ceil(out_each * batch_size * self.headroom)
+        return FanOutEstimate(
+            n_calls=batch_size,
+            tokens=input_tokens + output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            tokens_per_char=rate,
+            output_tokens_per_call=out_each,
+            basis=basis,
+        )
+
+    # -- checking the claim ----------------------------------------------
+
+    def record_batch(self, *, reserved_tokens: int, actual_tokens: int) -> None:
+        """Log what a finished batch reserved against what it really used.
+
+        Both totals are kept rather than a running mean of per-batch ratios,
+        because a mean of ratios lets a tiny batch that over-reserved by a
+        factor of ten outweigh a large one that was accurate, and it is the
+        tokens that get billed.
+        """
+        if reserved_tokens < 0 or actual_tokens < 0:
+            raise ValueError("token counts cannot be negative")
+        with self._lock:
+            self._batches += 1
+            self._reserved_tokens += reserved_tokens
+            self._actual_tokens += actual_tokens
+
+    @property
+    def over_reservation_ratio(self) -> float | None:
+        """Tokens reserved over tokens actually spent, across every batch.
+
+        None until a batch has both reserved and settled something. The number
+        to beat is the 4x to 6x that the published static estimators concede,
+        and the 2.11x their adaptive variant concedes.
+        """
+        with self._lock:
+            if self._batches == 0 or self._actual_tokens == 0:
+                return None
+            return self._reserved_tokens / self._actual_tokens
+
+    def describe(self) -> str:
+        """One line for the run record, naming the ratio actually achieved."""
+        ratio = self.over_reservation_ratio
+        with self._lock:
+            batches = self._batches
+            reserved = self._reserved_tokens
+            actual = self._actual_tokens
+            samples = self._samples
+        measured = "no batch measured yet" if ratio is None else f"{ratio:.2f}x"
+        return (
+            f"FanOutEstimator[{samples} sample(s)] over-reservation {measured} "
+            f"({reserved} reserved / {actual} spent across {batches} batch(es))"
+        )
+
+
 class Unbounded:
     """A budget that bounds nothing, and says so where it matters.
 
@@ -550,6 +820,27 @@ class Unbounded:
                 f"a reservation must cover at least one call, got {n_calls}"
             )
         return CallReservation(granted=True, reason="unbounded")
+
+    def release(self, *, n_calls: int) -> None:
+        """Nothing to give back, because nothing was held.
+
+        Present so that a caller written against a budget that refunds does not
+        have to ask whether this one does.
+        """
+        if n_calls < 1:
+            raise ValueError(f"a release must cover at least one call, got {n_calls}")
+
+    def remaining(self) -> CallReservation:
+        """Every dimension None, because none of them is bounded.
+
+        `granted` is False for the reason the port gives: nothing was taken.
+        Callers deciding whether a further attempt fits must read the headroom
+        fields, and here they say, correctly, that no ceiling exists to fit
+        inside.
+        """
+        return CallReservation(
+            granted=False, reason="unbounded: nothing was reserved, nothing bounds it"
+        )
 
     def settle(self, usage: TokenUsage, cost_usd: float | None) -> None:
         with self._lock:
