@@ -228,9 +228,18 @@ relevant here too: 20 samples per condition in a single run gives large effect
 sizes with small n, and this project should not repeat that shape while citing
 it.
 
-The harness preserves the records needed for this calculation, but it does not
-yet provide a noise-floor command or report field. It remains a release gate
-for a public delta.
+The harness exposes this calculation as `noise_floor(label, replicates)` and
+accepts the resulting `NoiseFloor` in `build_report` or `build_comparison`.
+It refuses empty replicates, duplicate sample records, different sample sets,
+and different corpus hashes. A report then carries every depth-one delta with
+the measured floor that delta has to clear. This is a library interface today;
+the CLI does not yet schedule repeated provider runs.
+
+`build_comparison` accepts external baseline records alongside the RLM records.
+It requires the same corpus, sample identifiers and grading policy for every
+row, prints the accuracy-cost frontier, and only treats an accuracy lead as a
+claim when it clears the measured noise floor and lies inside the configured
+cost band. It does not fabricate a result for any benchmark or baseline.
 
 ## What is reported alongside accuracy
 
@@ -267,6 +276,27 @@ evaluations of this technique are in.
 The right frame for an eventual result is an honest ablation of an RLM scaffold.
 HAL already provides cost-controlled scaffold comparisons. A HAL adapter is
 future work, not a capability claimed by this repository.
+
+## Research records and optional strategies
+
+Optional research strategies must preserve the same audit trail as an ordinary
+evaluation. `ResearchRun` requires a depth-zero control and records immutable
+trials and ordered stages with configuration and budget fingerprints. An
+append-only, hash-chained JSONL `EventLog` can persist that record; validation
+and replay reconstruct the submitted record without invoking a provider.
+
+The optional screen, PEEK-style maps, SRLM candidate search, verifier
+recombination, Chained RLM handoffs, bounded agent-harness plans, and prompt
+optimisation APIs are local tools for controlled experiments. They do not make
+a public result, and their presence does not relax the table refusals above.
+Prompt optimisation pins disjoint train, validation, and test fingerprints and
+forbids test-set candidate selection. More detail is in [RESEARCH.md](RESEARCH.md).
+
+For task-shaped local anomaly experiments, `anomalyxl-local` accepts a
+caller-supplied hash-locked JSONL dataset and uses strict JSON predictions. It
+reports localization, classification-with-evidence, magnitude, multichannel,
+and lead-lag metrics. This is a clean-room local adapter informed by TimeRLM
+and AnomalyXL, not an official dataset adapter or a claim of scorer parity.
 
 ## Reporting a negative result
 

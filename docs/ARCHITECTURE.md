@@ -137,6 +137,50 @@ policies, and requires a depth-zero row. The report layer can compute a paired
 noise floor, but the CLI does not yet schedule replicates for it or provide HAL
 integration.
 
+## Optional research layer
+
+[`research/`](../src/rlm0/research/) sits beside the serving runtime. Its
+strategies receive or produce ordinary immutable `Run` records and add
+experiment-only contracts around them. They do not replace `assembly.build_rlm`
+or change the default depth policy.
+
+```text
+ordinary Run records
+        |
+        +--> ResearchRun / ResearchTrial / ResearchStage
+        |         |
+        |         +--> hash-chained JSONL event log --> validated record replay
+        |         +--> bounded content-addressed artifacts
+        |
+        +--> optional strategies
+                  |
+                  +--> screen and PEEK-style context maps
+                  +--> SRLM search and verifier recombination
+                  +--> fresh-root chained handoffs
+                  +--> declared bounded agent-harness plans
+                  +--> split-safe prompt optimisation
+```
+
+`ResearchRun` keeps a depth-zero control and fingerprints its configuration and
+budget. `EventLog` is append-only and hash chained; replay validates and
+reconstructs persisted records without rerunning a provider. `ArtifactStore`
+is atomic and bounded, and stages carry artifact digests instead of exposing
+host paths to strategy executors.
+
+The strategies are dependency-injected. SRLM receives candidate runs from a
+factory, verifier recombination receives a verifier, Chained RLM receives fresh
+roots, and the agent-harness path receives a declared plan plus an executor.
+This keeps their budgets, provider choices, and sandbox assembly outside the
+research contracts. It also means none of them is a claimed paper reproduction
+or a ready-made autonomous orchestration system. Details and API limits are in
+[RESEARCH.md](RESEARCH.md).
+
+[`benchmarks/anomalyxl.py`](../src/rlm0/benchmarks/anomalyxl.py) is similarly
+separate from the published benchmark adapters. It accepts only a local,
+manifest-hash-locked JSONL dataset and strict JSON predictions. It is informed
+by TimeRLM and AnomalyXL task shapes, but does not download, vendor, or claim
+official-data or scorer parity.
+
 ## Layer boundaries
 
 `run.py` and `ports.py` define contracts. `budget.py`, `policy.py`, prompt,

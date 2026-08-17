@@ -206,6 +206,10 @@ environmental reasoning and evidence-aware evaluation more directly than a
 general recursion claim. The permissive final-answer recovery in its harness is
 also a reason for rlm0 to move toward a strict, versioned completion protocol.
 
+rlm0 includes a local AnomalyXL-style adapter with strict JSON parsing and a
+caller-supplied, manifest-hash-locked JSONL format. It is task-inspired work,
+not an official adapter, a vendored scorer, or a reproduced TimeRLM result.
+
 **Chained Recursive Language Models.** See the extension section below. It is
 the relevant prior art for using fresh roots, a compact blackboard, artifacts,
 and handoffs across stages. This is not part of rlm0's default policy.
@@ -381,17 +385,40 @@ artifacts instead of full history. This is prior art for fresh-root handoffs,
 not for rlm0's depth-zero paired control. The paper does not provide enough
 cost-matched detail to support a general serving claim.
 
+`research.chained` implements a bounded fresh-root handoff protocol for local
+experiments. It limits summary, blackboard, next-step, and artifact metadata;
+it records each stage; and it keeps every root as an ordinary controlled `Run`.
+It does not claim to reproduce the paper's training, prompts, or evaluation.
+
 **RLMOpt.** Satheesha, Pande, Duddempudi, Dandala.
 [arXiv:2608.10471](https://arxiv.org/abs/2608.10471), 11 Aug 2026. **[V]**
 RLM as the controller for prompt optimisation, with deterministic execution,
 Pareto selection, and regression/significance guards. It is adjacent evaluation
 and development work, not an inference-runtime replacement.
 
+`research.optimize` implements the guardrail side of that idea: immutable
+candidate prompts, pinned split identities, validation-only selection, cost
+ceilings, a Pareto frontier, and uncertainty-aware regression rejection. It
+does not generate a published prompt result or automatically modify rlm0's
+shipping prompt.
+
 **PEEK.** Gu, Zhang, **Khattab**, Madden.
 [arXiv:2605.19932](https://arxiv.org/abs/2605.19932), May 2026. **[V]** A
 constant-sized context map cached across invocations. Khattab's own follow-up
 direction, and amortisation across runs rather than depth control within one,
 so it is complementary.
+
+`research.peek` supplies a local, identity-checked map record and atomic map
+store. It does not include a hosted map-building model or make an amortised-cost
+claim.
+
+**SRLM, verifier recombination, and bounded agent harnesses.** The optional
+research package also includes injected-factory SRLM-style depth-zero candidate
+search, evidence-carrying verifier recombination, and declared bounded
+agent-harness plans. These are clean-room, local interfaces built around
+ordinary `Run` records. The agent-harness API is not a reproduction of
+Recursive Agent Harnesses: it executes a predeclared tree and does not run a
+model-generated asynchronous orchestration script.
 
 **Coding Agents are Effective Long-Context Processors.** Cao, Yin, Dhingra,
 Zhou. [arXiv:2603.20432](https://arxiv.org/abs/2603.20432), Mar 2026. **[V on

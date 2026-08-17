@@ -14,6 +14,7 @@
   <a href="#quick-start">Quick start</a> &bull;
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/EVALUATION.md">Evaluation</a> &bull;
+  <a href="docs/RESEARCH.md">Research APIs</a> &bull;
   <a href="docs/RELATED_WORK.md">Related work</a> &bull;
   <a href="https://github.com/alexzhang13/rlm">Reference implementation</a>
 </p>
@@ -183,11 +184,29 @@ run from this repository.
 The complete protocol and negative-result policy are in
 [docs/EVALUATION.md](docs/EVALUATION.md).
 
+## Optional research APIs
+
+[`rlm0.research`](src/rlm0/research/) is a separate, local and API-first
+layer for controlled research experiments. It does not alter the normal
+depth-0 then depth-1 runtime or make any public benchmark result.
+
+It provides immutable `ResearchRun` records, hash-chained JSONL replay logs,
+and a bounded content-addressed artifact store. On top of those contracts are
+conservative context screening, PEEK-style maps, SRLM candidate search,
+verifier-backed recombination, fresh-root Chained RLM handoffs, declared
+bounded agent-harness plans, and split-safe prompt optimisation.
+
+The local `anomalyxl-local` adapter accepts a caller-supplied, hash-locked
+JSONL dataset for precise anomaly tasks. It is informed by TimeRLM and
+AnomalyXL task shapes; it neither downloads nor claims compatibility with the
+official dataset or scorer. See [docs/RESEARCH.md](docs/RESEARCH.md) for the
+contracts, limits, and intended use of each API.
+
 ## Project status
 
 rlm0 is alpha software. The runtime, CLI, provider adapters, Docker sandbox,
-experimental microVM path, synthetic harness, and public benchmark adapters are
-implemented and tested on Python 3.11 through 3.13.
+experimental microVM path, synthetic harness, public benchmark adapters, and
+optional research APIs are implemented and tested on Python 3.11 through 3.13.
 
 The remaining work needs external systems or data: live provider measurements,
 public benchmark runs, microVM testing on KVM, and HAL integration. These items
