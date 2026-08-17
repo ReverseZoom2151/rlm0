@@ -256,7 +256,13 @@ class MapStore:
             )
             temporary = Path(temporary_name)
             try:
-                os.fchmod(descriptor, 0o600)
+                # Windows does not expose ``fchmod``. Permissions there are
+                # governed by the caller's ACL and this store never treats an
+                # ACL as proof of privacy; the POSIX mode hardening remains
+                # useful where it is available.
+                fchmod = getattr(os, "fchmod", None)
+                if os.name == "posix" and callable(fchmod):
+                    fchmod(descriptor, 0o600)
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(payload)
                     stream.flush()
