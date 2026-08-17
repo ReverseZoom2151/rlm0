@@ -547,7 +547,27 @@ def noise_floor(
             "a noise floor needs at least two replicates of the same "
             "configuration"
         )
-    id_sets = [frozenset(record.sample_id for record in rep) for rep in replicates]
+    id_sets: list[frozenset[str]] = []
+    corpus_hashes: set[str] = set()
+    for number, replicate in enumerate(replicates, 1):
+        ids = [record.sample_id for record in replicate]
+        if len(ids) != len(set(ids)):
+            raise ReportRefusalError(
+                f"replicate {number} contains a sample more than once, so its "
+                "accuracy weights that sample more heavily than the others"
+            )
+        if not replicate:
+            raise ReportRefusalError(
+                f"replicate {number} has no records, so it measures no run-to-run "
+                "variation"
+            )
+        id_sets.append(frozenset(ids))
+        corpus_hashes.update(record.corpus_hash for record in replicate)
+    if len(corpus_hashes) != 1:
+        raise ReportRefusalError(
+            "replicates were measured on different corpora, so their spread "
+            "includes a corpus change rather than only run-to-run noise"
+        )
     if len({*id_sets}) != 1:
         raise ReportRefusalError(
             "replicates cover different samples, so their spread measures the "
@@ -753,11 +773,23 @@ class ResultTable:
         """Raise if this table would be a claim it cannot support."""
         if not self.rows:
             raise ReportRefusalError("a result table with no rows reports nothing")
+        labels = [row.label for row in self.rows]
+        if len(labels) != len(set(labels)):
+            raise ReportRefusalError(
+                "two rows share a label, so a comparison cannot identify which "
+                "configuration its delta refers to"
+            )
         for row in self.rows:
             if not row.scores:
                 raise ReportRefusalError(
                     f"row {row.label!r} has no scored samples, so its figures "
                     "are averages over nothing"
+                )
+            sample_ids = [score.sample_id for score in row.scores]
+            if len(sample_ids) != len(set(sample_ids)):
+                raise ReportRefusalError(
+                    f"row {row.label!r} scores a sample more than once, so its "
+                    "aggregate gives some tasks more weight than others"
                 )
         if not any(row.is_depth_zero for row in self.rows):
             raise ReportRefusalError(
