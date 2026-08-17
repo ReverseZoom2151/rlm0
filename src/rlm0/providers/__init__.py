@@ -33,6 +33,7 @@ from rlm0.providers.fake import (
     FakeReply,
     ScriptExhaustedError,
 )
+from rlm0.providers.gemini_client import GeminiClient
 from rlm0.providers.openai_client import OpenAIClient
 from rlm0.providers.params import (
     CHAT_STYLE,
@@ -70,6 +71,7 @@ __all__ = [
     "FakeCall",
     "FakeClient",
     "FakeReply",
+    "GeminiClient",
     "ModelPrice",
     "OpenAIClient",
     "PriceTable",
