@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -17,6 +18,9 @@ from random import Random
 __all__ = [
     "CandidateEvaluation",
     "EvaluationBudget",
+    "EvaluationPermit",
+    "EvaluationRefusal",
+    "EvaluationReservation",
     "EvolutionConfig",
     "MetricEstimate",
     "OptimizationError",
@@ -155,7 +159,7 @@ class CandidateEvaluation:
     cost_usd: float
 
     def __post_init__(self) -> None:
-        if not self.metrics or self.cost_usd < 0:
+        if not self.metrics or self.cost_usd < 0 or not math.isfinite(self.cost_usd):
             raise OptimizationError("evaluation needs metrics and a nonnegative cost")
 
 
@@ -165,12 +169,22 @@ class EvaluationBudget:
     max_cost_usd: float
 
     def __post_init__(self) -> None:
-        if self.max_candidates < 1 or self.max_cost_usd < 0:
+        if (
+            self.max_candidates < 1
+            or self.max_cost_usd < 0
+            or not math.isfinite(self.max_cost_usd)
+        ):
             raise OptimizationError(
                 "evaluation budget must allow candidates and nonnegative cost"
             )
 
     def check(self, evaluations: Sequence[CandidateEvaluation]) -> None:
+        """Validate externally supplied evaluations after the fact.
+
+        ``evolve`` uses :class:`_EvaluationLedger` instead, because a check
+        after dispatch cannot keep a provider inside its budget.
+        """
+
         if len(evaluations) > self.max_candidates:
             raise OptimizationError(
                 "candidate evaluation count exceeds the declared budget"
@@ -179,6 +193,99 @@ class EvaluationBudget:
             raise OptimizationError(
                 "candidate evaluation cost exceeds the declared budget"
             )
+
+    def ledger(self) -> _EvaluationLedger:
+        """Create the mutable reserve, settle, and refund ledger for one search."""
+
+        return _EvaluationLedger(self)
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationPermit:
+    """The maximum spend reserved before one candidate may be evaluated.
+
+    An evaluator must bind its provider work to ``max_cost_usd``. The optimizer
+    also rejects a returned cost above the permit, making an adapter that ignores
+    the permit a visible contract failure instead of a quiet overspend.
+    """
+
+    candidate_fingerprint: str
+    ordinal: int
+    max_cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationReservation:
+    """One completed reservation, including the unused amount refunded."""
+
+    permit: EvaluationPermit
+    actual_cost_usd: float
+    refunded_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationRefusal:
+    """A candidate stopped before provider dispatch because no permit fit."""
+
+    candidate_fingerprint: str
+    reason: str
+
+
+class _EvaluationLedger:
+    """A sequential, fail-closed cost ledger for candidate evaluation."""
+
+    def __init__(self, budget: EvaluationBudget) -> None:
+        self._budget = budget
+        self._spent = 0.0
+        self._reserved = 0.0
+        self._count = 0
+        self._reservations: list[EvaluationReservation] = []
+
+    @property
+    def remaining_usd(self) -> float:
+        return self._budget.max_cost_usd - self._spent - self._reserved
+
+    @property
+    def reservations(self) -> tuple[EvaluationReservation, ...]:
+        return tuple(self._reservations)
+
+    def reserve(
+        self, candidate_fingerprint: str, quoted_cost_usd: float
+    ) -> EvaluationPermit:
+        if self._count >= self._budget.max_candidates:
+            raise OptimizationError(
+                "candidate evaluation count exceeds the declared budget"
+            )
+        if quoted_cost_usd < 0 or not math.isfinite(quoted_cost_usd):
+            raise OptimizationError("candidate cost quote must be nonnegative")
+        if quoted_cost_usd > self.remaining_usd:
+            raise OptimizationError(
+                "candidate evaluation cannot be reserved inside the remaining budget"
+            )
+        permit = EvaluationPermit(candidate_fingerprint, self._count, quoted_cost_usd)
+        self._reserved += quoted_cost_usd
+        self._count += 1
+        return permit
+
+    def settle(
+        self, permit: EvaluationPermit, evaluation: CandidateEvaluation
+    ) -> EvaluationReservation:
+        if evaluation.candidate_fingerprint != permit.candidate_fingerprint:
+            raise OptimizationError("evaluator returned a result for another candidate")
+        if evaluation.cost_usd > permit.max_cost_usd:
+            raise OptimizationError("evaluator exceeded its reserved cost permit")
+        self._reserved -= permit.max_cost_usd
+        self._spent += evaluation.cost_usd
+        reservation = EvaluationReservation(
+            permit, evaluation.cost_usd, permit.max_cost_usd - evaluation.cost_usd
+        )
+        self._reservations.append(reservation)
+        return reservation
+
+    def release(self, permit: EvaluationPermit) -> None:
+        """Refund a permit whose evaluator raised before returning a result."""
+
+        self._reserved -= permit.max_cost_usd
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +360,10 @@ class ParetoFrontier:
         return cls(pareto_frontier(values))
 
 
-Evaluator = Callable[[PromptCandidate, Split, str], CandidateEvaluation]
+Evaluator = Callable[
+    [PromptCandidate, Split, str, EvaluationPermit], CandidateEvaluation
+]
+CostEstimator = Callable[[PromptCandidate, Split, str], float]
 Mutator = Callable[[PromptSections, Random], PromptSections]
 
 
@@ -266,6 +376,8 @@ class OptimizationReport:
     frontier: ParetoFrontier
     recommended: str | None
     split_fingerprint: str
+    reservations: tuple[EvaluationReservation, ...]
+    refused_candidates: tuple[EvaluationRefusal, ...]
 
 
 def _evaluate(
@@ -275,6 +387,7 @@ def _evaluate(
     budget: EvaluationBudget,
     gate: RegressionGate,
     incumbent: CandidateEvaluation | None,
+    estimate_cost: CostEstimator | None,
 ) -> OptimizationReport:
     unique = {candidate.fingerprint: candidate for candidate in candidates}
     if len(unique) > budget.max_candidates:
@@ -283,15 +396,36 @@ def _evaluate(
         )
     evaluations: list[CandidateEvaluation] = []
     approved: list[CandidateEvaluation] = []
+    refusals: list[EvaluationRefusal] = []
+    ledger = budget.ledger()
     for candidate in unique.values():
-        result = evaluator(candidate, Split.VALIDATION, guard.validation_fingerprint)
-        if result.candidate_fingerprint != candidate.fingerprint:
-            raise OptimizationError("evaluator returned a result for another candidate")
+        remaining = ledger.remaining_usd
+        quoted_cost = (
+            remaining
+            if estimate_cost is None
+            else estimate_cost(
+                candidate, Split.VALIDATION, guard.validation_fingerprint
+            )
+        )
+        try:
+            permit = ledger.reserve(candidate.fingerprint, quoted_cost)
+        except OptimizationError as exc:
+            if not evaluations:
+                raise
+            refusals.append(EvaluationRefusal(candidate.fingerprint, str(exc)))
+            break
+        try:
+            result = evaluator(
+                candidate, Split.VALIDATION, guard.validation_fingerprint, permit
+            )
+        except Exception:
+            ledger.release(permit)
+            raise
+        ledger.settle(permit, result)
         guard.allow_selection(result.split, result.split_fingerprint)
         evaluations.append(result)
         if incumbent is None or gate.approve(incumbent, result):
             approved.append(result)
-    budget.check(evaluations)
     frontier = ParetoFrontier.from_evaluations(approved)
     recommended = (
         min(frontier.evaluations, key=lambda item: item.cost_usd).candidate_fingerprint
@@ -304,6 +438,8 @@ def _evaluate(
         frontier,
         recommended,
         guard.validation_fingerprint,
+        ledger.reservations,
+        tuple(refusals),
     )
 
 
@@ -342,6 +478,7 @@ def evolve(
     gate: RegressionGate,
     config: EvolutionConfig | None = None,
     incumbent: CandidateEvaluation | None = None,
+    estimate_cost: CostEstimator | None = None,
 ) -> OptimizationReport:
     """Run deterministic mutation/crossover search on validation only."""
     config = EvolutionConfig() if config is None else config
@@ -360,4 +497,6 @@ def evolve(
         population = list({item.fingerprint: item for item in population}.values())[
             : budget.max_candidates
         ]
-    return _evaluate(population, evaluator, guard, budget, gate, incumbent)
+    return _evaluate(
+        population, evaluator, guard, budget, gate, incumbent, estimate_cost
+    )

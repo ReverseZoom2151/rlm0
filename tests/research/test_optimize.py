@@ -7,6 +7,7 @@ import pytest
 from rlm0.research.optimize import (
     CandidateEvaluation,
     EvaluationBudget,
+    EvaluationPermit,
     EvolutionConfig,
     MetricEstimate,
     OptimizationError,
@@ -85,7 +86,7 @@ def test_evolution_is_deterministic_bounded_and_validation_only() -> None:
     calls: list[tuple[Split, str]] = []
 
     def evaluator(
-        candidate: PromptCandidate, split: Split, fingerprint: str
+        candidate: PromptCandidate, split: Split, fingerprint: str, _permit: object
     ) -> CandidateEvaluation:
         calls.append((split, fingerprint))
         score = 0.9 if "+" in candidate.sections.method else 0.8
@@ -118,7 +119,7 @@ def test_evaluator_cannot_lie_about_candidate_data_or_budget() -> None:
     seed = _candidate()
 
     def wrong_candidate(
-        _: PromptCandidate, split: Split, fingerprint: str
+        _: PromptCandidate, split: Split, fingerprint: str, _permit: object
     ) -> CandidateEvaluation:
         return CandidateEvaluation(
             "f" * 64,
@@ -136,4 +137,62 @@ def test_evaluator_cannot_lie_about_candidate_data_or_budget() -> None:
             guard=_guard(),
             budget=EvaluationBudget(2, 1.0),
             gate=RegressionGate(("accuracy",)),
+        )
+
+
+def test_evaluation_cost_is_reserved_before_each_dispatch() -> None:
+    calls: list[float] = []
+
+    def evaluator(
+        candidate: PromptCandidate,
+        split: Split,
+        fingerprint: str,
+        permit: EvaluationPermit,
+    ) -> CandidateEvaluation:
+        calls.append(permit.max_cost_usd)
+        return CandidateEvaluation(
+            candidate.fingerprint,
+            split,
+            fingerprint,
+            {"accuracy": MetricEstimate(1.0, 0.0, 1)},
+            0.4,
+        )
+
+    report = evolve(
+        (_candidate("one"), _candidate("two")),
+        mutate=lambda sections, _: sections,
+        evaluator=evaluator,
+        guard=_guard(),
+        budget=EvaluationBudget(2, 0.5),
+        gate=RegressionGate(("accuracy",)),
+        estimate_cost=lambda *_: 0.4,
+    )
+
+    assert len(calls) == 1
+    assert report.reservations[0].actual_cost_usd == 0.4
+    assert report.reservations[0].refunded_usd == 0.0
+    assert len(report.refused_candidates) == 1
+
+
+def test_evaluator_cannot_return_cost_above_its_reserved_permit() -> None:
+    def evaluator(
+        candidate: PromptCandidate, split: Split, fingerprint: str, _permit: object
+    ) -> CandidateEvaluation:
+        return CandidateEvaluation(
+            candidate.fingerprint,
+            split,
+            fingerprint,
+            {"accuracy": MetricEstimate(1.0, 0.0, 1)},
+            0.6,
+        )
+
+    with pytest.raises(OptimizationError, match="reserved cost permit"):
+        evolve(
+            (_candidate("one"), _candidate("two")),
+            mutate=lambda sections, _: sections,
+            evaluator=evaluator,
+            guard=_guard(),
+            budget=EvaluationBudget(2, 1.0),
+            gate=RegressionGate(("accuracy",)),
+            estimate_cost=lambda *_: 0.5,
         )
