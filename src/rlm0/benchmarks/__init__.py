@@ -34,6 +34,7 @@ will be compared anyway.
 
 from __future__ import annotations
 
+from rlm0.benchmarks.anomalyxl import AnomalyMetrics, AnomalyXL
 from rlm0.benchmarks.context import chunk_context, locate
 from rlm0.benchmarks.dataset import (
     ENV_ROOT,
@@ -73,6 +74,8 @@ __all__ = [
     "ADAPTERS",
     "ENV_ROOT",
     "NOT_ADAPTED",
+    "AnomalyMetrics",
+    "AnomalyXL",
     "BenchmarkAdapter",
     "BenchmarkDataError",
     "BenchmarkManifest",

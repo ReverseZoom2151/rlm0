@@ -1,4 +1,4 @@
-"""Which public benchmarks this project can run, and which it deliberately cannot.
+"""Which benchmark adapters this project can run, and which it cannot yet.
 
 The second list is the one that matters. It is easy to publish a benchmark
 integration that is a name in a dictionary and a prompt string with no data
@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from rlm0.benchmarks.anomalyxl import AnomalyXL
 from rlm0.benchmarks.niah import RulerNiah
 from rlm0.benchmarks.oolong import OolongReal, OolongSynth
 from rlm0.benchmarks.suite import BenchmarkAdapter
@@ -34,6 +35,7 @@ __all__ = [
 
 
 ADAPTERS: Mapping[str, Callable[[], BenchmarkAdapter]] = {
+    "anomalyxl-local": AnomalyXL,
     "oolong-synth": OolongSynth,
     "oolong-real": OolongReal,
     "ruler-s-niah": RulerNiah,
@@ -118,7 +120,9 @@ def describe_catalogue() -> str:
     for name in names():
         adapter = get(name)
         requirement = adapter.requirement(
-            split="test" if name == "ruler-s-niah" else "validation"
+            split="test"
+            if name in {"anomalyxl-local", "ruler-s-niah"}
+            else "validation"
         )
         lines.append(f"  {name:<16}{requirement.source} @ {requirement.revision[:12]}")
     lines.append("")

@@ -86,7 +86,12 @@ def test_oolong_real_adapter_loads_and_scores_offline_rows(tmp_path: Path) -> No
 
 
 def test_catalogue_lists_only_adapters_with_a_real_loader() -> None:
-    assert names() == ("oolong-real", "oolong-synth", "ruler-s-niah")
+    assert names() == (
+        "anomalyxl-local",
+        "oolong-real",
+        "oolong-synth",
+        "ruler-s-niah",
+    )
     catalogue = describe_catalogue()
     assert "considered and not adapted:" in catalogue
     assert "AGGBench" in catalogue

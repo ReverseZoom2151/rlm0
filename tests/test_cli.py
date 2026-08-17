@@ -337,6 +337,7 @@ def test_benchmark_list_is_local_and_does_not_need_a_provider(
 
     captured = capsys.readouterr()
     assert code == cli.EXIT_OK
+    assert "anomalyxl-local" in captured.out
     assert "oolong-synth" in captured.out
     assert "AGGBench" in captured.out
 
@@ -362,6 +363,30 @@ def test_benchmark_missing_data_stops_before_runtime_assembly(
     captured = capsys.readouterr()
     assert code == cli.EXIT_CONFIG
     assert "to obtain it, run:" in captured.err
+    assert "rlm0.assembly" not in captured.err
+
+
+def test_local_anomalyxl_requires_its_manifest_before_runtime_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setitem(sys.modules, "rlm0.assembly", None)
+
+    code = cli.main(
+        [
+            "benchmark",
+            "anomalyxl-local",
+            "--data-root",
+            str(tmp_path / "missing"),
+            "--provider",
+            "fake",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_CONFIG
+    assert "manifest.json" in captured.err
     assert "rlm0.assembly" not in captured.err
 
 

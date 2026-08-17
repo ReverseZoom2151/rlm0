@@ -84,7 +84,7 @@ path the real system does not have.
 _FAKE_FINAL_TURN = (
     'RLM0_FINAL_V1({"protocol_version": 1, "status": "answered", "answer": '
     '"the fake provider does not answer questions. It exists so that the sandbox, '
-    'the budget and the run record can be exercised end to end without calling a '
+    "the budget and the run record can be exercised end to end without calling a "
     'model.", "evidence": [], "answer_artifact": null})'
 )
 """What it says on every turn after the first."""
@@ -506,7 +506,7 @@ def cmd_benchmark(args: argparse.Namespace, argv: Sequence[str]) -> int:
         adapter = get(args.name)
         split = (
             "test"
-            if args.split == "auto" and args.name == "ruler-s-niah"
+            if args.split == "auto" and args.name in {"anomalyxl-local", "ruler-s-niah"}
             else "validation"
             if args.split == "auto"
             else args.split
@@ -957,9 +957,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     benchmark = sub.add_parser(
         "benchmark",
-        help="run a pinned public benchmark stored locally",
+        help="run a pinned benchmark stored locally",
         description=(
-            "Loads a benchmark from a local, revision-pinned mirror and runs "
+            "Loads a benchmark from local, pinned data and runs "
             "it through the same evidence-aware harness as the synthetic suite. "
             "No data is downloaded and no provider call starts until the data "
             "has passed the adapter's checks."
@@ -968,7 +968,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "name",
         nargs="?",
-        choices=("oolong-real", "oolong-synth", "ruler-s-niah"),
+        choices=("anomalyxl-local", "oolong-real", "oolong-synth", "ruler-s-niah"),
         help="benchmark to run; omit with --list",
     )
     benchmark.add_argument(
@@ -981,7 +981,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "dataset split to load; auto selects validation, or test for "
-            "RULER (default: %(default)s)"
+            "AnomalyXL-local and RULER (default: %(default)s)"
         ),
     )
     benchmark.add_argument(
