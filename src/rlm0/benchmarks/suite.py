@@ -38,6 +38,7 @@ from rlm0.harness.runner import Solver, SuiteResult, run_suite
 __all__ = [
     "BENCHMARK_FILENAME",
     "OFFICIAL_FILENAME",
+    "RESULT_FILENAME",
     "BenchmarkAdapter",
     "BenchmarkManifest",
     "BenchmarkResult",
@@ -48,6 +49,14 @@ __all__ = [
 
 BENCHMARK_FILENAME = "benchmark.json"
 OFFICIAL_FILENAME = "official_scores.json"
+RESULT_FILENAME = "result.json"
+"""One machine-readable index of the three files needed to reproduce a result.
+
+``records.jsonl`` remains the source of truth.  This small index deliberately
+does not copy it: copying raw records creates a second, potentially divergent
+answer source.  It gives an archive consumer the data provenance, harness
+configuration, official score and exact relative filenames in one place.
+"""
 
 ADAPTER_VERSION = "0.1.0"
 
@@ -220,6 +229,26 @@ def run_benchmark(
             {
                 "summary": official.to_dict(),
                 "per_sample": [r.to_dict() for r in official_results],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / RESULT_FILENAME).write_text(
+        json.dumps(
+            {
+                "format": "rlm0-benchmark-result/v1",
+                "benchmark": suite.manifest.to_dict(),
+                "harness_manifest": result.manifest,
+                "official": official.to_dict(),
+                "files": {
+                    "records": "records.jsonl",
+                    "corpus": "corpus.json",
+                    "benchmark": BENCHMARK_FILENAME,
+                    "official_scores": OFFICIAL_FILENAME,
+                },
+                "complete": len(result.records) == suite.manifest.n_samples,
             },
             indent=2,
             sort_keys=True,

@@ -14,6 +14,43 @@ from rlm0.benchmarks.niah import RulerNiah, string_match_all
 from rlm0.benchmarks.oolong import OolongReal, OolongSynth, score_real, score_synth
 from rlm0.benchmarks.registry import describe_catalogue, names
 from rlm0.benchmarks.scoring import OfficialItem
+from rlm0.benchmarks.suite import RESULT_FILENAME, run_benchmark
+from rlm0.harness.corpus import SolverTask
+from rlm0.harness.runner import Attempted, SolverResult
+from rlm0.run import Attempt, CallRecord, Outcome, Role, Run, TokenUsage
+
+
+class _NoAnswerSolver:
+    """A fully accounted solver used to test result persistence offline."""
+
+    def describe(self) -> str:
+        return "offline no-answer fixture"
+
+    def solve(self, task: SolverTask) -> SolverResult:
+        # The runner only needs the task's question.  This fixture purposely
+        # returns no answer, which lets the official scorer prove that it
+        # records unanswered rows instead of silently dropping them.
+        question = task.question
+        call = CallRecord(
+            role=Role.ROOT,
+            depth=0,
+            model="fixture",
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+            wall_clock_s=0.0,
+            cost_usd=0.0,
+        )
+        attempt = Attempt(
+            max_depth=0,
+            outcome=Outcome.ITERATIONS_EXHAUSTED,
+            calls=(call,),
+            wall_clock_s=0.0,
+        )
+        run = Run(task=question, attempts=(attempt,), budget_summary="fixture")
+        return SolverResult(
+            run=run,
+            final=Attempted(answer=None),
+            baseline=Attempted(answer=None),
+        )
 
 
 def test_ruler_metric_matches_its_substring_contract() -> None:
@@ -53,3 +90,16 @@ def test_catalogue_lists_only_adapters_with_a_real_loader() -> None:
     catalogue = describe_catalogue()
     assert "considered and not adapted:" in catalogue
     assert "AGGBench" in catalogue
+
+
+def test_benchmark_writes_one_reproducibility_index(tmp_path: Path) -> None:
+    root = tmp_path / "oolong-synth"
+    write_jsonl(root / "validation.jsonl", oolong_synth_rows())
+    suite = OolongSynth().load(root=root)
+
+    result = run_benchmark(suite, _NoAnswerSolver(), tmp_path / "out")
+
+    payload = (tmp_path / "out" / RESULT_FILENAME).read_text(encoding="utf-8")
+    assert '"format": "rlm0-benchmark-result/v1"' in payload
+    assert '"official_scores": "official_scores.json"' in payload
+    assert result.official.n_unanswered == suite.manifest.n_samples
