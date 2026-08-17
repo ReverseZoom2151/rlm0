@@ -1,18 +1,22 @@
 <h1 align="center">rlm0</h1>
 
-<p align="center"><strong>Recursion Only When It Pays</strong></p>
+<p align="center"><strong>A Recursive Language Model that runs depth 0 on every task, so recursion always has a baseline to beat.</strong></p>
 
-A recursive language model answers questions about text far bigger than its
-context window. It holds the text in a REPL, writes code to slice and search
-it, and calls itself on the pieces. The technique works, and on some tasks the
-margins are enormous.
+<p align="center"><sub>Clean-room implementation of <a href="https://arxiv.org/abs/2512.24601">Zhang, Kraska &amp; Khattab (2025)</a>. Tree-wide budget reservation, prefix caching across sub-calls, and a network-isolated sandbox.</sub></p>
 
-The trouble is that almost nobody can tell you whether the recursion was the
-part that helped, or what the run cost when it didn't.
+## What is an RLM?
 
-rlm0 tries depth zero first: same environment, same prompt, sub-calls switched
-off. It goes deeper only if that fails. Both attempts land in the same record,
-so you can see what recursion bought and what you paid for it.
+Language models degrade well before they hit their context limit. A Recursive
+Language Model sidesteps that by keeping the prompt out of the window
+entirely: the text is bound to a variable in a persistent Python REPL, and the
+model writes code to slice, search and partition it, sending only selected
+pieces to sub-LLM calls.
+
+## What rlm0 adds
+
+Depth 0 is the same REPL loop with sub-calls switched off. rlm0 runs it first
+on every task and escalates only when it fails. Both attempts land in one
+record, so every run reports what recursion cost and whether it helped.
 
 ## Why this exists
 
