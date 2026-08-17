@@ -14,6 +14,10 @@ host. Do not assume Podman or libkrun support from this project. Docker is a
 useful containment layer but shares the host kernel; use the microVM backend on
 a host you control when the context is genuinely hostile.
 
+The default Docker image is pinned by manifest digest. Review and update that
+digest as an explicit dependency change, then exercise the sandbox tests against
+the replacement before using it for untrusted context.
+
 If a sandbox reports malformed protocol data, loses its process, or cannot
 prove a requested isolation property, treat the run as failed. It must never
 fall back to subprocess execution.

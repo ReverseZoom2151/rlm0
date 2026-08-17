@@ -34,7 +34,13 @@ from rlm0.sandbox.protocol import STDOUT_CHAR_CAP, HostCallable
 
 __all__ = ["DEFAULT_IMAGE", "DockerSandbox", "docker_available", "run_argv"]
 
-DEFAULT_IMAGE: Final = "python:3.11-slim"
+# The multi-platform manifest selected from Docker Hub on 2026-08-17. A tag
+# changes underneath a security test; this digest does not. Callers can still
+# supply an explicitly reviewed replacement image.
+DEFAULT_IMAGE: Final = (
+    "python:3.11-slim@sha256:"
+    "9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7"
+)
 
 _PROBE_TIMEOUT_S: Final = 20.0
 _PULL_TIMEOUT_S: Final = 600.0
