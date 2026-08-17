@@ -327,6 +327,8 @@ class ResearchRun:
             raise ValueError("research run needs an id")
         if self.control.baseline is None or len(self.control.attempts) != 1:
             raise ValueError("research control must be one real depth-zero Run")
+        if not self.trials:
+            raise ValueError("research run needs at least one paired trial")
         _require_fingerprint(self.config_fingerprint, "config_fingerprint")
         _require_fingerprint(self.budget_fingerprint, "budget_fingerprint")
         parsed = json.loads(self.config_json)
@@ -338,6 +340,15 @@ class ResearchRun:
         trial_ids = [trial.trial_id for trial in self.trials]
         if len(trial_ids) != len(set(trial_ids)):
             raise ValueError("research trial ids must be unique")
+        for trial in self.trials:
+            if trial.run.task != self.control.task:
+                raise ValueError(
+                    "research trial task must exactly match its depth-zero control"
+                )
+            if trial.budget_fingerprint != self.budget_fingerprint:
+                raise ValueError(
+                    "research trial budget must exactly match its depth-zero control"
+                )
 
     @property
     def config(self) -> dict[str, Any]:

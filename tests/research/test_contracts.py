@@ -64,7 +64,7 @@ def test_research_record_round_trips_without_a_provider() -> None:
         _trial_run(),
         stages=(stage,),
         config={"temperature": 0},
-        budget={"max_calls": 10},
+        budget={"max_calls": 20},
     )
     research = ResearchRun.create(
         "research-1",
@@ -101,7 +101,12 @@ def test_trial_requires_a_control() -> None:
 
 
 def test_tampered_config_fingerprint_is_refused() -> None:
-    research = ResearchRun.create("r", _control(), (), config={"seed": 1})
+    trial = ResearchTrial.create(
+        "trial", "srlm", _trial_run(), budget={"max_calls": 20}
+    )
+    research = ResearchRun.create(
+        "r", _control(), (trial,), config={"seed": 1}, budget={"max_calls": 20}
+    )
     payload = research.to_dict()
     payload["config"]["seed"] = 2
     with pytest.raises(ValueError, match="configuration"):
@@ -112,3 +117,29 @@ def test_stages_must_be_contiguous() -> None:
     stage = ResearchStage.create(1, "late", {})
     with pytest.raises(ValueError, match="contiguous"):
         ResearchTrial.create("x", "srlm", _trial_run(), stages=(stage,))
+
+
+def test_research_requires_a_nonempty_paired_trial() -> None:
+    with pytest.raises(ValueError, match="at least one paired trial"):
+        ResearchRun.create("empty", _control(), ())
+
+
+def test_research_refuses_a_trial_for_another_task() -> None:
+    unrelated = Run(
+        task="other task",
+        attempts=(Attempt(0, Outcome.ANSWERED, (_call(),), 0.1, answer="x"),),
+        budget_summary="max $1",
+    )
+    trial = ResearchTrial.create("other", "srlm", unrelated)
+    with pytest.raises(ValueError, match="task must exactly match"):
+        ResearchRun.create("r", _control(), (trial,))
+
+
+def test_research_refuses_a_trial_with_a_different_budget() -> None:
+    trial = ResearchTrial.create(
+        "candidate", "srlm", _trial_run(), budget={"max_calls": 10}
+    )
+    with pytest.raises(ValueError, match="budget must exactly match"):
+        ResearchRun.create(
+            "r", _control(), (trial,), budget={"max_calls": 20}
+        )
