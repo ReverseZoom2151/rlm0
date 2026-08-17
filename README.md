@@ -87,11 +87,44 @@ which puts prompt injection one step from code execution. Sub-calls get
 serviced by the host across that boundary, so nothing inside ever needs a
 socket or a key.
 
+## How this compares
+
+| Approach | Where the text lives | Decides at runtime | Cost shape | Best for |
+| --- | --- | --- | --- | --- |
+| Single-shot | In the window | No | Flat, one pass of input | Small inputs |
+| Long-context cram | In the window | No | Full text on every call | It fits and cost is no object |
+| RAG | Retrieved chunks | No | Cheap retrieval plus one call | Factoid lookup over a corpus |
+| Map-reduce | Fixed chunking | No | Linear in chunks | Summarisation |
+| **RLM at depth 0** | REPL variable | Yes | Root calls only, no fan-out | Search and retrieval over huge text |
+| **RLM at depth 1+** | REPL variable | Yes | Root plus a fan-out per turn | Aggregation across the whole text |
+
+Most implementations treat the last two rows as one thing. They are not. Depth
+0 already handles text far past the window and wins outright on retrieval, and
+the fan-out is what costs money. Choosing between them per task is the job
+rlm0 exists to do.
+
+## Limitations
+
+When recursion was always going to be needed, running depth 0 first costs one
+extra attempt. That is the price of the baseline, it is real, and the run
+record shows it.
+
+A cost ceiling cannot be enforced against calls nobody can price, so the
+budget fails closed when it meets one and says why. If you point rlm0 at a
+model with no entry in the price table and set a spending limit, it will stop
+rather than guess.
+
+Real isolation needs Docker. The subprocess fallback keeps a runaway loop from
+taking out the orchestrator, but it runs as you, with your filesystem, and it
+is not a boundary against a hostile context.
+
+There is no benchmark number yet, and none will be published here without a
+depth-0 row beside it.
+
 ## Where it stands
 
 The contract and the seams are built and tested. The runtime, sandbox,
-providers and harness are in progress. There is no benchmark number yet, and
-there won't be one published without a depth-zero row next to it.
+providers and harness are in progress.
 
 ## Prior work
 
