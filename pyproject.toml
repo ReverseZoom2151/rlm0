@@ -60,6 +60,7 @@ include = [
     "tests",
     "docs",
     "README.md",
+    "CITATION.cff",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "SECURITY.md",

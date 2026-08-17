@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: >-
+  If you use rlm0, cite this software and the papers for the methods you use.
+  The README and docs/CITATIONS.md map each module to its source.
+title: rlm0
+type: software
+authors:
+  - family-names: ReverseZoom2151
+version: 0.1.0
+repository-code: https://github.com/ReverseZoom2151/rlm0
+url: https://github.com/ReverseZoom2151/rlm0
+license: MIT

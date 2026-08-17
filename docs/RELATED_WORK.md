@@ -5,6 +5,9 @@ paper, and the design rests on about forty. It is organised by what each source
 changed here, not by topic, because a bibliography that does not say what it
 changed is decoration.
 
+Citation-ready entries for the papers tied directly to implemented modules are
+in [`CITATIONS.md`](CITATIONS.md).
+
 Sources are marked **[V]** where a primary source was read, **[S]** where only a
 secondary source was available, and **[?]** where a claim could not be
 confirmed. Anything marked [S] should be checked before it is quoted anywhere
