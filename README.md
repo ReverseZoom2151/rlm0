@@ -4,6 +4,30 @@
 
 <p align="center"><sub>Clean-room implementation of <a href="https://arxiv.org/abs/2512.24601">Zhang, Kraska &amp; Khattab (2025)</a>. Tree-wide budget reservation, prefix caching across sub-calls, and a network-isolated sandbox.</sub></p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/typed-mypy%20strict-blue.svg" alt="mypy strict" />
+  <a href="https://arxiv.org/abs/2512.24601"><img src="https://img.shields.io/badge/arXiv-2512.24601-b31b1b.svg" alt="arXiv" /></a>
+</p>
+
+<p align="center">
+  <a href="https://arxiv.org/abs/2512.24601">Paper</a> &bull;
+  <a href="https://github.com/alexzhang13/rlm">Reference implementation</a> &bull;
+  <a href="docs/PRIOR_ART.md">Prior art</a> &bull;
+  <a href="#what-a-run-looks-like">Example run</a>
+</p>
+
+A clean-room implementation of the paper [*Recursive Language
+Models*](https://arxiv.org/abs/2512.24601) (Zhang, Kraska and Khattab, MIT
+CSAIL, 2025), built around the finding the paper reports and the field mostly
+skips: the REPL is what handles length, and recursion is a task-conditional
+accelerator on top of it.
+
+This is not a reproduction. There are no trained weights here, no published
+benchmark numbers, and no claim that any figure from the paper has been
+reproduced.
+
 ## What is an RLM?
 
 Language models degrade well before they hit their context limit. A Recursive
@@ -17,6 +41,27 @@ pieces to sub-LLM calls.
 Depth 0 is the same REPL loop with sub-calls switched off. rlm0 runs it first
 on every task and escalates only when it fails. Both attempts land in one
 record, so every run reports what recursion cost and whether it helped.
+
+```text
+  task
+    │
+    ▼
+  depth 0 ── REPL, context in a variable, sub-calls off
+    │
+    ├── answered ────────────────────────►  stop        verdict: not_attempted
+    │
+    └── failed
+          │
+          ▼
+        depth 1 ── same REPL, same prompt, sub-calls on
+          │
+          ├── answered ────────────────────►  stop      verdict: helped
+          │
+          └── failed ──────────────────────►  escalate, or wind down
+
+  every call tagged with role and depth   ·   budget reserved before dispatch
+  both attempts kept in one Run           ·   cost is None when unpriceable
+```
 
 ## Why this exists
 
@@ -128,16 +173,26 @@ providers and harness are in progress.
 
 ## Prior work
 
-The idea comes from [Recursive Language
-Models](https://arxiv.org/abs/2512.24601) by Alex L. Zhang, Tim Kraska and Omar
-Khattab at MIT CSAIL. Their implementation is at
-[alexzhang13/rlm](https://github.com/alexzhang13/rlm). This is a clean-room
-build and shares no code with it.
+The authors' own implementation is at
+[alexzhang13/rlm](https://github.com/alexzhang13/rlm), and it is the reference
+for this paradigm. rlm0 shares no code with it.
 
 Reading twenty open implementations end to end shaped most of the design
-decisions here. Credits and sources are in
+decisions here, including several taken directly from repositories that solved
+a problem better than the reference does. Credits and sources are in
 [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
 
-## License
+## License and citation
 
-[MIT](LICENSE).
+Released under the [MIT License](LICENSE). If this work informs research, cite
+the original paper rather than this repository:
+
+```bibtex
+@article{zhang2025recursive,
+  title={Recursive Language Models},
+  author={Zhang, Alex L. and Kraska, Tim and Khattab, Omar},
+  journal={arXiv preprint arXiv:2512.24601},
+  year={2025},
+  url={https://arxiv.org/abs/2512.24601}
+}
+```
