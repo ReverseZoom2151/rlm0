@@ -243,6 +243,34 @@ def test_the_sandbox_choice_is_passed_through_unsoftened(
         cli.main(_argv("--sandbox", "auto"))
 
 
+def test_require_microvm_never_succeeds_just_because_docker_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import rlm0.sandbox as sandbox
+
+    monkeypatch.setattr(sandbox, "docker_available", lambda: True)
+    monkeypatch.setattr(sandbox, "microvm_available", lambda: False)
+
+    code = cli.main(["sandbox", "--require", "microvm"])
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_UNAVAILABLE
+    assert "microVM runtime" in captured.err
+    assert "DockerSandbox" not in captured.out
+
+
+def test_require_microvm_reports_the_registered_backend(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import rlm0.sandbox as sandbox
+
+    monkeypatch.setattr(sandbox, "docker_available", lambda: True)
+    monkeypatch.setattr(sandbox, "microvm_available", lambda: True)
+
+    assert cli.main(["sandbox", "--require", "microvm"]) == cli.EXIT_OK
+    assert "MicroVMSandbox" in capsys.readouterr().out
+
+
 # -- cost ---------------------------------------------------------------
 
 
@@ -299,10 +327,61 @@ def test_cost_says_when_the_ceiling_would_bind(
     assert "exceeds --max-usd" in capsys.readouterr().out
 
 
+# -- benchmarks and preflight -----------------------------------------
+
+
+def test_benchmark_list_is_local_and_does_not_need_a_provider(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["benchmark", "--list"])
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_OK
+    assert "oolong-synth" in captured.out
+    assert "AGGBench" in captured.out
+
+
+def test_benchmark_missing_data_stops_before_runtime_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setitem(sys.modules, "rlm0.assembly", None)
+
+    code = cli.main(
+        [
+            "benchmark",
+            "oolong-synth",
+            "--data-root",
+            str(tmp_path / "missing"),
+            "--provider",
+            "fake",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_CONFIG
+    assert "to obtain it, run:" in captured.err
+    assert "rlm0.assembly" not in captured.err
+
+
+def test_doctor_downloads_nothing_and_does_not_require_a_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["doctor"])
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_OK
+    assert "credentials are read only" in captured.out
+    assert "downloads nothing" in captured.out
+
+
 # -- parser -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("command", ["run", "eval", "cost", "sandbox"])
+@pytest.mark.parametrize(
+    "command", ["run", "eval", "benchmark", "cost", "sandbox", "doctor"]
+)
 def test_every_subcommand_has_help(command: str) -> None:
     with pytest.raises(SystemExit) as caught:
         cli.main([command, "--help"])

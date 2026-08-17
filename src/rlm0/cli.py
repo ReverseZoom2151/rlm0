@@ -291,8 +291,10 @@ def _policy(args: argparse.Namespace) -> Any:
         if args.policy == "never":
             return Never()
         if args.policy == "fixed":
-            return Fixed(depth=args.max_depth)
-        return Escalating(max_depth=args.max_depth)
+            return Fixed(depth=args.max_depth, experimental=args.experimental_depth)
+        return Escalating(
+            max_depth=args.max_depth, experimental=args.experimental_depth
+        )
     except ValueError as exc:
         raise CliError(EXIT_CONFIG, f"--max-depth {args.max_depth}: {exc}") from exc
 
@@ -475,6 +477,100 @@ def cmd_eval(args: argparse.Namespace, argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
+# -- benchmark ----------------------------------------------------------
+
+
+def cmd_benchmark(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Run one pinned local benchmark through the normal harness.
+
+    Data acquisition is intentionally outside this command.  The adapter
+    names the exact revision and files it needs when they are absent, before a
+    provider client or a sandbox is constructed.  That order matters: a
+    missing corpus must not spend a token merely to discover it is missing.
+    """
+    from rlm0.benchmarks.registry import describe_catalogue, get, names
+    from rlm0.benchmarks.suite import run_benchmark
+    from rlm0.harness import GradingPolicy
+
+    if args.list:
+        print(describe_catalogue())
+        return EXIT_OK
+    if args.name is None:
+        raise CliError(
+            EXIT_USAGE,
+            "benchmark name is required unless --list is given",
+            hint=f"choose one of: {', '.join(names())}",
+        )
+    try:
+        adapter = get(args.name)
+        split = (
+            "test"
+            if args.split == "auto" and args.name == "ruler-s-niah"
+            else "validation"
+            if args.split == "auto"
+            else args.split
+        )
+        suite = adapter.load(
+            split=split,
+            root=args.data_root,
+            limit=args.limit,
+            expected_hash=args.expected_data_hash,
+        )
+    except KeyError as exc:
+        raise CliError(EXIT_CONFIG, str(exc)) from exc
+    except Exception as exc:
+        # Dataset errors include the pinned revision and acquisition commands.
+        # Do not turn that useful text into a generic stack trace.
+        if type(exc).__name__ in {"DatasetUnavailableError", "BenchmarkDataError"}:
+            raise CliError(EXIT_CONFIG, str(exc)) from exc
+        raise CliError(
+            EXIT_FAILED, f"could not load benchmark: {_detail(exc)}"
+        ) from exc
+
+    solver = _RuntimeSolver(
+        factory=_runtime_factory(args), label=_describe_config(args)
+    )
+    print(
+        f"benchmark: {suite.manifest.describe()}\n"
+        f"data: {args.data_root if args.data_root is not None else 'default cache'}",
+        file=sys.stderr,
+    )
+    try:
+        result = run_benchmark(
+            suite,
+            solver,
+            args.out,
+            policy=GradingPolicy(),
+            invocation=list(argv),
+            resume=not args.no_resume,
+        )
+        print(result.describe())
+        print(f"\nrecords and reproducibility manifest: {args.out}")
+    except CliError:
+        raise
+    except Exception as exc:
+        raise CliError(
+            EXIT_FAILED, f"the benchmark suite failed: {_detail(exc)}"
+        ) from exc
+    return EXIT_OK
+
+
+def cmd_doctor(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Report local prerequisites without reading credentials or spending money."""
+    del argv
+    from rlm0.benchmarks.registry import describe_catalogue
+
+    print(f"rlm0 {__version__}")
+    print("providers: credentials are read only when a provider run starts")
+    print("benchmarks:")
+    print(describe_catalogue())
+    print("\nsandbox: run `rlm0 sandbox --require docker` before a remote run")
+    print(
+        "note: benchmark data and provider calls are opt-in; doctor downloads nothing"
+    )
+    return EXIT_OK
+
+
 # -- cost ---------------------------------------------------------------
 
 
@@ -612,7 +708,12 @@ def _usd(value: float | None) -> str:
 def cmd_sandbox(args: argparse.Namespace, argv: Sequence[str]) -> int:
     del argv
     try:
-        from rlm0.sandbox import SandboxUnavailableError, docker_available
+        from rlm0.sandbox import (
+            DEFAULT_MICROVM_RUNTIME,
+            SandboxUnavailableError,
+            docker_available,
+            microvm_available,
+        )
     except Exception as exc:  # pragma: no cover - only on a broken install
         raise CliError(
             EXIT_UNAVAILABLE, f"the sandbox package will not import: {_detail(exc)}"
@@ -620,6 +721,30 @@ def cmd_sandbox(args: argparse.Namespace, argv: Sequence[str]) -> int:
 
     docker = docker_available()
     print(f"docker: {'available' if docker else 'not available'}")
+
+    microvm = microvm_available()
+    print(
+        "microvm "
+        f"({DEFAULT_MICROVM_RUNTIME}): "
+        f"{'runtime registered' if microvm else 'not available'}"
+    )
+
+    if args.require == "microvm":
+        if not microvm:
+            raise CliError(
+                EXIT_UNAVAILABLE,
+                "no Docker daemon with the configured microVM runtime answered, "
+                "and --require microvm was given",
+                hint=(
+                    "install and register a Docker OCI microVM runtime such as "
+                    "Kata Containers, then run this check again"
+                ),
+            )
+        print(
+            "backend: MicroVMSandbox, OCI microVM runtime registered; "
+            "a run verifies the guest kernel before accepting work"
+        )
+        return EXIT_OK
 
     if args.require == "docker" and not docker:
         raise CliError(
@@ -693,7 +818,12 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         help="how deep to go after a failed attempt (default: %(default)s)",
     )
     group.add_argument(
-        "--max-depth", type=int, default=2, help="deepest attempt permitted"
+        "--max-depth", type=int, default=1, help="deepest attempt permitted"
+    )
+    group.add_argument(
+        "--experimental-depth",
+        action="store_true",
+        help="allow depths above 1; they are experimental and not the default",
     )
     group.add_argument(
         "--max-iterations", type=int, default=8, help="REPL turns per attempt"
@@ -824,6 +954,69 @@ def build_parser() -> argparse.ArgumentParser:
     _add_budget_options(evaluate)
     evaluate.set_defaults(handler=cmd_eval)
 
+    benchmark = sub.add_parser(
+        "benchmark",
+        help="run a pinned public benchmark stored locally",
+        description=(
+            "Loads a benchmark from a local, revision-pinned mirror and runs "
+            "it through the same evidence-aware harness as the synthetic suite. "
+            "No data is downloaded and no provider call starts until the data "
+            "has passed the adapter's checks."
+        ),
+    )
+    benchmark.add_argument(
+        "name",
+        nargs="?",
+        choices=("oolong-real", "oolong-synth", "ruler-s-niah"),
+        help="benchmark to run; omit with --list",
+    )
+    benchmark.add_argument(
+        "--list",
+        action="store_true",
+        help="list adapted and explicitly unadapted benchmarks, then exit",
+    )
+    benchmark.add_argument(
+        "--split",
+        default="auto",
+        help=(
+            "dataset split to load; auto selects validation, or test for "
+            "RULER (default: %(default)s)"
+        ),
+    )
+    benchmark.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="local root for this benchmark; never a download destination",
+    )
+    benchmark.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="maximum local rows to run, for a smoke test only",
+    )
+    benchmark.add_argument(
+        "--expected-data-hash",
+        default=None,
+        metavar="SHA256",
+        help="refuse data whose adapter hash differs from this value",
+    )
+    benchmark.add_argument(
+        "--out",
+        type=Path,
+        default=Path("runs/benchmark"),
+        help="directory for records, score and reproducibility files",
+    )
+    benchmark.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="discard prior records in --out before running",
+    )
+    _add_runtime_options(benchmark)
+    _add_budget_options(benchmark)
+    benchmark.set_defaults(handler=cmd_benchmark)
+
     cost = sub.add_parser(
         "cost",
         help="show what a configuration could cost before spending anything",
@@ -854,6 +1047,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="fail unless this backend is the one available",
     )
     sandbox.set_defaults(handler=cmd_sandbox)
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="list local prerequisites without contacting a provider",
+    )
+    doctor.set_defaults(handler=cmd_doctor)
 
     return parser
 
