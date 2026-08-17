@@ -34,8 +34,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import stat
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -572,6 +573,190 @@ def cmd_doctor(args: argparse.Namespace, argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
+# -- research inspection ------------------------------------------------
+
+
+_INSPECTION_FILE_LIMIT = 8 * 1024 * 1024
+"""A metadata inspection command never needs an unbounded local file."""
+
+
+def _inspection_file(path: Path) -> bytes:
+    """Read one bounded regular file for a local, read-only inspection.
+
+    Research records may describe confidential contexts.  The inspection
+    commands deliberately print identifiers and accounting only, and they
+    refuse symlinks so an apparently harmless metadata command cannot be used
+    to follow a path outside the record a caller named.
+    """
+
+    try:
+        file_stat = path.lstat()
+    except OSError as exc:
+        raise CliError(
+            EXIT_CONFIG, f"could not inspect {path}: {exc.strerror}"
+        ) from exc
+    if not stat.S_ISREG(file_stat.st_mode) or stat.S_ISLNK(file_stat.st_mode):
+        raise CliError(EXIT_CONFIG, f"{path} is not a regular file")
+    if file_stat.st_size > _INSPECTION_FILE_LIMIT:
+        raise CliError(
+            EXIT_CONFIG,
+            f"{path} exceeds the {_INSPECTION_FILE_LIMIT // (1024 * 1024)} MB "
+            "inspection limit",
+        )
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise CliError(EXIT_CONFIG, f"could not read {path}: {exc.strerror}") from exc
+
+
+def _inspection_json(path: Path) -> object:
+    try:
+        return json.loads(_inspection_file(path).decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise CliError(EXIT_CONFIG, f"{path} is not UTF-8 JSON") from exc
+    except json.JSONDecodeError as exc:
+        raise CliError(EXIT_CONFIG, f"{path} is not valid JSON") from exc
+
+
+def cmd_research_replay(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Validate and summarise a recorded session without executing it again."""
+
+    del argv
+    from rlm0.research.events import EventValidationError, read_events, replay
+
+    # `read_events` deliberately reads line-by-line as a complete hash chain.
+    # Bound the file first, before it gets a chance to allocate for a malformed
+    # local record.
+    _inspection_file(args.events)
+    try:
+        restored = replay(read_events(args.events))
+    except (EventValidationError, OSError, UnicodeDecodeError, ValueError) as exc:
+        raise CliError(
+            EXIT_CONFIG,
+            f"research event log could not be validated: {_detail(exc)}",
+            hint=(
+                "replay validates the recorded session only; it never reruns a "
+                "provider"
+            ),
+        ) from exc
+
+    research = restored.research
+    print(f"research: {research.research_id}")
+    print(f"events: {len(restored.events)}")
+    print(f"chain: {restored.events[-1].digest}")
+    print(
+        "control: "
+        f"{len(research.control.attempts)} depth-zero attempt, "
+        f"{research.control.attempts[0].outcome.value}"
+    )
+    print(f"trials: {len(research.trials)}")
+    for trial in research.trials:
+        print(
+            f"  {trial.trial_id}: strategy={trial.strategy}, "
+            f"attempts={len(trial.run.attempts)}, stages={len(trial.stages)}, "
+            f"config={trial.config_fingerprint[:16]}, "
+            f"budget={trial.budget_fingerprint[:16]}"
+        )
+    return EXIT_OK
+
+
+def cmd_research_screen(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Inspect a persisted screen report without rerunning its checkers."""
+
+    from rlm0.research.screen import ScreenReport, ScreenResult, ScreenVerdict
+
+    del argv
+    value = _inspection_json(args.report)
+    try:
+        if not isinstance(value, Mapping) or set(value) != {"verdict", "results"}:
+            raise ValueError("screen report needs exactly verdict and results")
+        raw_results = value["results"]
+        if not isinstance(raw_results, list):
+            raise ValueError("screen report results must be a list")
+        results: list[ScreenResult] = []
+        for raw in raw_results:
+            if not isinstance(raw, Mapping) or set(raw) - {
+                "verdict",
+                "checker",
+                "detail",
+            }:
+                raise ValueError("screen result has an unsupported shape")
+            results.append(
+                ScreenResult(
+                    verdict=ScreenVerdict(str(raw["verdict"])),
+                    checker=str(raw["checker"]),
+                    detail=str(raw.get("detail", "")),
+                )
+            )
+        report = ScreenReport(ScreenVerdict(str(value["verdict"])), tuple(results))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliError(
+            EXIT_CONFIG, f"screen report is invalid: {_detail(exc)}"
+        ) from exc
+
+    print(f"screen verdict: {report.verdict.value}")
+    print(f"checks: {len(report.results)}")
+    for result in report.results:
+        # A checker's detail can contain a context excerpt.  The result is
+        # inspectable without putting that content back in a terminal history.
+        print(f"  {result.checker}: {result.verdict.value}")
+    return EXIT_OK
+
+
+def cmd_research_map(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Inspect PEEK map identity and coverage without printing its summaries."""
+
+    from rlm0.research.peek import ContextMap, MapIdentity, MapSection
+
+    del argv
+    value = _inspection_json(args.map)
+    try:
+        if not isinstance(value, Mapping) or set(value) != {
+            "format_version",
+            "identity",
+            "sections",
+        }:
+            raise ValueError("map needs format_version, identity, and sections")
+        identity = value["identity"]
+        sections = value["sections"]
+        if not isinstance(identity, Mapping) or not isinstance(sections, list):
+            raise ValueError("map identity or sections has an invalid shape")
+        section_records = tuple(
+            MapSection(**dict(item))
+            for item in sections
+            if isinstance(item, Mapping)
+        )
+        context_map = ContextMap(
+            identity=MapIdentity(**dict(identity)),
+            sections=section_records,
+            format_version=int(value["format_version"]),
+        )
+        if len(context_map.sections) != len(sections):
+            raise ValueError("map sections must all be objects")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliError(EXIT_CONFIG, f"PEEK map is invalid: {_detail(exc)}") from exc
+
+    identity = context_map.identity
+    print(f"map key: {identity.key}")
+    print(f"context: sha256={identity.context_sha256}, chars={identity.context_chars}")
+    print(
+        "builder: "
+        f"{identity.builder_id}, model={identity.model}, "
+        f"prompt={identity.prompt_version}, "
+        f"schema={identity.schema_version}"
+    )
+    print(
+        f"sections: {len(context_map.sections)}/{identity.max_entries}, "
+        f"summary limit={identity.summary_char_limit} chars"
+    )
+    for index, section in enumerate(context_map.sections, 1):
+        print(
+            f"  {index}: chars {section.start}:{section.end}, "
+            f"summary chars={len(section.summary)}"
+        )
+    return EXIT_OK
+
+
 # -- cost ---------------------------------------------------------------
 
 
@@ -1055,6 +1240,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="list local prerequisites without contacting a provider",
     )
     doctor.set_defaults(handler=cmd_doctor)
+
+    research = sub.add_parser(
+        "research",
+        help="inspect recorded optional-strategy research without rerunning it",
+        description=(
+            "Read and validate local research records. These commands never "
+            "construct a provider, a sandbox, or a runtime."
+        ),
+    )
+    research_sub = research.add_subparsers(dest="research_command", required=True)
+
+    replay_parser = research_sub.add_parser(
+        "replay",
+        help="validate a hash-chained event log and print safe accounting",
+        description=(
+            "Reconstructs the immutable recorded session without provider calls. "
+            "It prints identifiers and accounting, never answers or context."
+        ),
+    )
+    replay_parser.add_argument("events", type=Path, metavar="EVENTS_JSONL")
+    replay_parser.set_defaults(handler=cmd_research_replay)
+
+    screen_parser = research_sub.add_parser(
+        "inspect-screen",
+        help="inspect a saved screen decision without running any checker",
+    )
+    screen_parser.add_argument("report", type=Path, metavar="SCREEN_JSON")
+    screen_parser.set_defaults(handler=cmd_research_screen)
+
+    map_parser = research_sub.add_parser(
+        "inspect-map",
+        help="inspect a saved PEEK map without printing its summaries",
+    )
+    map_parser.add_argument("map", type=Path, metavar="MAP_JSON")
+    map_parser.set_defaults(handler=cmd_research_map)
 
     return parser
 
