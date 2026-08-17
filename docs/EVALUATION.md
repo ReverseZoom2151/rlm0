@@ -63,8 +63,8 @@ cost is accounted for, and that chain-of-thought with self-consistency beat them
 at under a tenth of the cost. A scaffold that beats its own ablation and loses
 to CoT with self-consistency has not demonstrated anything worth deploying.
 
-So the table has at least three rows, and CoT with self-consistency is in it at
-matched cost. Matched cost, not matched call count: self-consistency at k
+So the table has at least three rows, and CoT with self-consistency is included
+at matched cost. Matched cost, not matched call count: self-consistency at k
 samples is cheap per sample and the comparison is only fair if it is given the
 budget the recursive system actually spent.
 
@@ -223,9 +223,9 @@ relevant here too: 20 samples per condition in a single run gives large effect
 sizes with small n, and this project should not repeat that shape while citing
 it.
 
-Nothing in the harness computes a noise floor today. It is a procedure over
-`records.jsonl`, not a feature, and it is listed in
-[ROADMAP.md](ROADMAP.md) as unbuilt.
+The harness preserves the records needed for this calculation, but it does not
+yet provide a noise-floor command or report field. It remains a release gate
+for a public delta.
 
 ## What is reported alongside accuracy
 
@@ -259,11 +259,9 @@ why the full serialised `Run` is persisted per sample rather than a summary of
 it. Aggregates alone are unauditable, which is the state most published
 evaluations of this technique are in.
 
-The right frame for the eventual result, taken from
-[RELATED_WORK.md](RELATED_WORK.md), is an honest ablation of an RLM scaffold
-rather than a new harness. HAL already exists and its scaffold axis is this
-project's ablation axis. Running inside it rather than beside it is on the
-roadmap.
+The right frame for an eventual result is an honest ablation of an RLM scaffold.
+HAL already provides cost-controlled scaffold comparisons. A HAL adapter is
+future work, not a capability claimed by this repository.
 
 ## Reporting a negative result
 
