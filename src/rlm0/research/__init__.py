@@ -1,5 +1,13 @@
 """Optional research strategies built around the stable RLM runtime."""
 
+from rlm0.research.agent_harness import (
+    AgentHarnessExecutor,
+    HarnessLimits,
+    HarnessNode,
+    HarnessRequest,
+    HarnessResult,
+    run_agent_harness,
+)
 from rlm0.research.artifacts import ArtifactLimitError, ArtifactRef, ArtifactStore
 from rlm0.research.chained import (
     CHAIN_PROTOCOL,
@@ -39,6 +47,23 @@ from rlm0.research.optimize import (
     evolve,
     pareto_frontier,
 )
+from rlm0.research.peek import (
+    ContextMap,
+    MapBuildError,
+    MapIdentity,
+    MapSection,
+    MapStore,
+    MapStoreError,
+    build_context_map,
+)
+from rlm0.research.screen import (
+    ContextCheck,
+    ScreenReport,
+    ScreenResult,
+    ScreenVerdict,
+    parse_screen_response,
+    screen_context,
+)
 from rlm0.research.srlm import (
     CandidateFactory,
     CandidateSelection,
@@ -58,6 +83,7 @@ from rlm0.research.verifier import (
 
 __all__ = [
     "CHAIN_PROTOCOL",
+    "AgentHarnessExecutor",
     "ArtifactLimitError",
     "ArtifactRef",
     "ArtifactStore",
@@ -70,6 +96,8 @@ __all__ = [
     "ChainedHandoff",
     "ChainedLimitError",
     "ChainedProtocolError",
+    "ContextCheck",
+    "ContextMap",
     "EvaluationBudget",
     "EventLog",
     "EventRecord",
@@ -78,6 +106,15 @@ __all__ = [
     "FreshRoot",
     "FreshRootFactory",
     "HandoffLimits",
+    "HarnessLimits",
+    "HarnessNode",
+    "HarnessRequest",
+    "HarnessResult",
+    "MapBuildError",
+    "MapIdentity",
+    "MapSection",
+    "MapStore",
+    "MapStoreError",
     "MetricEstimate",
     "OptimizationError",
     "OptimizationReport",
@@ -93,17 +130,24 @@ __all__ = [
     "ResearchTrial",
     "SRLMError",
     "SRLMResult",
+    "ScreenReport",
+    "ScreenResult",
+    "ScreenVerdict",
     "Split",
     "SplitGuard",
     "Verification",
     "Verifier",
     "VerifierVerdict",
+    "build_context_map",
     "evolve",
     "execute_chained",
     "pareto_frontier",
     "parse_handoff",
+    "parse_screen_response",
     "read_events",
     "recombine",
     "replay",
+    "run_agent_harness",
+    "screen_context",
     "search",
 ]
