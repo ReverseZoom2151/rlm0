@@ -51,6 +51,26 @@ of them.
 `cached_prefix` and the cache token counts come from what the provider actually
 reported, never from the fact that we asked. Asking and receiving are different
 events, and the gap between them is the bug this diagnostic exists to catch.
+
+A FAN-OUT MUST BE WARMED BEFORE IT IS RELEASED
+----------------------------------------------
+Anthropic's documentation states that a cache entry becomes available only once
+the first response has begun, and that parallel requests sharing a prefix do
+not hit each other's cache. Firing N children at once against a cold prefix
+therefore saves nothing. It writes the prefix N times at 1.25x base input,
+which costs more than never asking for caching at all.
+
+The correct shape is a barrier: issue one call, wait for it to start coming
+back, then release the rest. That makes warming a correctness requirement of
+the cost model rather than a tuning step, and it is why this file cannot
+enforce it alone. A client sees one call at a time and cannot know it is part
+of a fan-out.
+
+Sub-calls are sequential today, so a cold fan-out cannot currently be issued
+and the problem does not arise. This note exists because parallel sub-calls are
+the obvious next feature, and adding them without a barrier would make every
+fan-out quietly more expensive while the cache hit rate reported beside it sat
+near zero and looked like somebody else's bug.
 """
 
 from __future__ import annotations

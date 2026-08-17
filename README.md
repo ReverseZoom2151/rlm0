@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://arxiv.org/abs/2512.24601">Paper</a> &bull;
   <a href="https://github.com/alexzhang13/rlm">Reference implementation</a> &bull;
-  <a href="docs/PRIOR_ART.md">Prior art</a> &bull;
+  <a href="docs/RELATED_WORK.md">Related work</a> &bull;
   <a href="#what-a-run-looks-like">Example run</a>
 </p>
 
@@ -65,23 +65,59 @@ record, so every run reports what recursion cost and whether it helped.
 
 ## Why this exists
 
-The headline numbers are real. On OOLONG-Pairs a frontier model scores 0.1 F1
-and the recursive version reaches 76.0. At six million input tokens, where no
-context window helps at all, questions get answered for under a dollar.
+One table, from an independent reproduction
+([arXiv:2603.02615](https://arxiv.org/abs/2603.02615)), explains the whole
+project.
 
-Underneath sits a quieter result that the paper states plainly and few people
-repeat. The REPL is what handles length. Recursion helps on dense aggregation,
-and on ordinary retrieval depth zero simply wins. A reproduction found depth
-two making things worse, with runtime going from 3.6 seconds to 344. Another
-group found recursion hurting outright once the text fits in the window.
+| | base model | RLM depth 1 | RLM depth 2 |
+| --- | --- | --- | --- |
+| S-NIAH (lookup) | **100%**, 3.6s | 85%, 89.3s | 70%, 344.5s |
+| OOLONG (aggregation) | **0%** | **42.1%** | 33.7% |
 
-The best-engineered open implementation I could find reports, in its own
-benchmark notes, that the model never recursed in any successful run.
-Recursion was configured, available, and never chosen.
+Recursion destroys lookup and creates aggregation out of nothing, in the same
+experiment. A strong base model is actively harmed: Kimi K2 falls from 86.6 to
+60. That paper's own recommendation is that future work should build better
+stopping mechanisms into the REPL.
 
-So this is a technique with a real but narrow sweet spot, and the engineering
-problem is knowing which side of it you are on before you pay for the wrong
-answer.
+The rest of the evidence points the same way. Apple's group reports that
+recursion is not the primary driver of RLM performance and hurts inside the
+native window. Prime Intellect's own evaluation shows a clear regression on
+math-python. The best-engineered open implementation reports, in its benchmark
+notes, that the model never once chose to recurse in any successful run.
+
+So the technique has a real but narrow sweet spot, and the engineering problem
+is knowing which side of it you are on before paying for the wrong answer.
+
+## What is and isn't new here
+
+Being straight about this, because the field moved fast and most of it is
+taken. RLM has been absorbed into
+[Code as Agent Harness](https://arxiv.org/abs/2605.18747), generalised by
+[Recursive Agent Harnesses](https://arxiv.org/abs/2606.13643), and shipped by
+Anthropic as Dynamic Workflows. Binding a context to a REPL variable is prior
+art ([CaveAgent](https://arxiv.org/abs/2601.01569), January 2026). Budget
+reserve-and-reconcile was published with a formal artifact in
+[June 2026](https://arxiv.org/abs/2606.04056), and budget conservation under
+delegation was proved in
+[January](https://arxiv.org/abs/2601.08815). Cost-controlled evaluation with
+Pareto reporting already exists as [HAL](https://arxiv.org/abs/2510.11977) at
+ICLR 2026.
+
+What appears to be unclaimed, after three literature sweeps:
+
+- **The paired control.** No published runtime runs the no-recursion attempt
+  first and keeps both results together.
+- **Graceful degradation under a binding budget.** A targeted search found
+  nothing. Existing work bounds or aborts; none winds down.
+- **A tight fan-out estimator.** The published budget work concedes 4 to 6x
+  static over-reservation. A runtime that knows its own fan-out width should
+  beat that.
+- **The threat model.** Nothing found addresses the hazard specific to this
+  architecture, where the untrusted context and the code-writing model share
+  one interpreter, so text under analysis can become the program.
+
+Everything above is sourced in [docs/RELATED_WORK.md](docs/RELATED_WORK.md),
+including the work that argues against this design.
 
 ## Install
 
@@ -163,6 +199,18 @@ Real isolation needs Docker. The subprocess fallback keeps a runaway loop from
 taking out the orchestrator, but it runs as you, with your filesystem, and it
 is not a boundary against a hostile context.
 
+The control cannot be depth 0 alone. Chain-of-thought with self-consistency
+beat automatically-designed multi-agent systems at under 10 percent of their
+cost ([arXiv:2606.13003](https://arxiv.org/abs/2606.13003)), so it has to be in
+the table at matched cost, well elicited rather than as a strawman. Two
+non-recursive methods also have to be beaten on their own ground:
+[ARC](https://arxiv.org/abs/2607.25066) on lookup and
+[VISTA](https://arxiv.org/abs/2606.30005) on LOCA-Bench.
+
+Real isolation should be a microVM. Shared-kernel containers are no longer
+considered adequate for model-written code, so the Docker backend here is a
+floor and not a ceiling.
+
 There is no benchmark number yet, and none will be published here without a
 depth-0 row beside it.
 
@@ -178,9 +226,9 @@ The authors' own implementation is at
 for this paradigm. rlm0 shares no code with it.
 
 Reading twenty open implementations end to end shaped most of the design
-decisions here, including several taken directly from repositories that solved
-a problem better than the reference does. Credits and sources are in
-[docs/PRIOR_ART.md](docs/PRIOR_ART.md).
+decisions here, including several taken from repositories that solved a problem
+better than the reference does. Sources, credits, and the papers that argue
+against this design are in [docs/RELATED_WORK.md](docs/RELATED_WORK.md).
 
 ## License and citation
 
