@@ -1,148 +1,214 @@
 <h1 align="center">rlm0</h1>
 
-<p align="center"><strong>Recursive Language Models with a depth-zero control, one run-wide budget, and isolated code execution.</strong></p>
+<p align="center"><strong>A bounded runtime for Recursive Language Models</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
-  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/typed-mypy%20strict-blue.svg" alt="mypy strict" />
-  <a href="https://arxiv.org/abs/2512.24601"><img src="https://img.shields.io/badge/arXiv-2512.24601-b31b1b.svg" alt="RLM paper" /></a>
+  <a href="https://github.com/ReverseZoom2151/rlm0/actions/workflows/ci.yml"><img src="https://github.com/ReverseZoom2151/rlm0/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/typed-mypy%20strict-2A6DB2.svg" alt="mypy strict" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F.svg" alt="MIT License" /></a>
+  <a href="https://arxiv.org/abs/2512.24601"><img src="https://img.shields.io/badge/arXiv-2512.24601-B31B1B.svg" alt="RLM paper" /></a>
 </p>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2512.24601">Paper</a> &bull;
-  <a href="https://github.com/alexzhang13/rlm">Reference implementation</a> &bull;
+  <a href="#quick-start">Quick start</a> &bull;
+  <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="docs/EVALUATION.md">Evaluation</a> &bull;
   <a href="docs/RELATED_WORK.md">Related work</a> &bull;
-  <a href="docs/EVALUATION.md">Evaluation protocol</a>
+  <a href="https://github.com/alexzhang13/rlm">Reference implementation</a>
 </p>
 
-rlm0 is a Python runtime for [Recursive Language Models](https://arxiv.org/abs/2512.24601).
-It binds long context to a variable in a persistent Python environment, lets a
-model inspect it with code, and can service focused sub-model calls without
-putting the whole context in a prompt.
+rlm0 keeps long context in an isolated Python environment. A model can search,
+compute, and call submodels over selected slices without loading the full source
+into its prompt.
 
-Each run starts with the same loop at depth 0, where sub-calls are unavailable.
-If it escalates, the depth-zero and recursive attempts remain in one `Run`
-record with call attribution, provider-reported usage, and one shared budget.
+Every task starts at depth 0, with subcalls disabled. If that attempt does not
+answer, the same runtime may try depth 1. Both attempts share one budget and
+remain together in the final run record, so the cost and effect of recursion
+are visible for that task.
 
-This is a clean-room implementation, not a reproduction of the RLM paper. It
-ships no model weights and no published benchmark result.
+> [!NOTE]
+> This is a clean-room RLM implementation, not a reproduction of the paper.
+> The repository ships no model weights and makes no benchmark claim yet.
 
-## Why depth zero comes first
+## Why rlm0
 
-Recursion is not uniformly useful. The small independent reproduction
-[*Think, But Don't Overthink*](https://arxiv.org/abs/2603.02615) found its base
-model scored 100% on S-NIAH lookup in 3.6 seconds, while depth 1 scored 85% in
-89.3 seconds. On OOLONG aggregation, the same study found the base model at 0%
-and depth 1 at 42.1%. The study used 20 examples per condition, so treat those
-numbers as motivation, not a general result.
+| Capability | What it does |
+| --- | --- |
+| Depth 0 control | Runs the nonrecursive REPL loop first on every task |
+| Shared budget | Reserves, settles, and refunds calls across the entire recursion tree |
+| Isolated execution | Runs model-authored Python without placing provider keys in the sandbox |
+| Bounded fanout | Reserves each batch before dispatch, warms its cache prefix, and preserves result order |
+| Inspectable runs | Records every call with its model, role, depth, usage, cost, and wall time |
+| Evidence-aware evaluation | Scores answers and cited evidence separately, with matched sample and cost checks |
 
-rlm0 makes that trade-off visible per run:
+## How it runs
 
 ```text
-task
-  |
-  v
-depth 0: persistent environment, sub-calls unavailable
-  |
-  +-- answered --> stop
-  |
-  +-- no answer --> depth 1+: same loop, sub-calls available
-                         |
-                         +-- answer, stop, or exhaust a bound
+long context
+     |
+     v
++-------------------+       code, stdout, variables
+| isolated Python   | <------------------------------+
+| context = source  |                                |
++---------+---------+                                |
+          |                                          |
+          v                                          |
+   depth 0 model ------------------------------------+
+   subcalls disabled
+          |
+          +-- answered --------------------------> Run
+          |
+          +-- no answer
+                 |
+                 v
+          depth 1 model
+          subcalls available
+                 |
+                 +-------------------------------> Run
 
-both attempts remain in one Run
-all calls carry a role and depth
-all reservations draw from one run-wide budget
+one run record, one budget, every call tagged by role and depth
 ```
+
+Depth 1 is the normal ceiling. Higher depths require both an experimental
+policy and the `--experimental-depth` flag.
 
 ## Quick start
 
-Python 3.11 or newer is required. The test suite uses fakes and needs no API
-key.
+Python 3.11 or newer is required.
 
 ```bash
 git clone https://github.com/ReverseZoom2151/rlm0.git
 cd rlm0
-pip install -e ".[dev,anthropic]"
-python -m pytest
+pip install -e ".[dev]"
 
-export ANTHROPIC_API_KEY=...
-rlm0 sandbox --require docker
-rlm0 run "Which supplier appears in both reports?" \
-  --context reports/ --provider anthropic --model claude-sonnet-5 \
-  --max-usd 0.50 --max-calls 20 --record run.json
+python -m pytest
+rlm0 doctor
+rlm0 benchmark --list
 ```
 
-`.[openai]` and `.[gemini]` install the other supported provider SDKs. Use
-`rlm0 run --provider fake` to exercise the assembled runtime without contacting
-a provider. `rlm0 eval` runs the deterministic synthetic corpus; public
-benchmark adapters are library APIs and require their pinned data locally.
+Install the SDK for the provider you intend to use:
 
-## Current capability status
+```bash
+pip install -e ".[anthropic]"  # or .[openai] / .[gemini]
+```
 
-| Capability | Status | Notes |
+Check the execution boundary before sending a task:
+
+```bash
+rlm0 sandbox --require docker
+```
+
+Run against a file or directory of context:
+
+```bash
+export ANTHROPIC_API_KEY="..."
+
+rlm0 run "Which supplier appears in both reports?" \
+  --context reports/ \
+  --provider anthropic \
+  --model YOUR_MODEL \
+  --max-usd 0.50 \
+  --max-calls 20 \
+  --record runs/suppliers.json
+```
+
+The final block printed by `rlm0 run` is always the run summary. It includes
+the depth 0 attempt, the recursive attempt when one occurred, and the budget
+used by each.
+
+## CLI
+
+| Command | Purpose |
+| --- | --- |
+| `rlm0 run` | Answer one task over local files or directories |
+| `rlm0 eval` | Run the deterministic synthetic evaluation suite |
+| `rlm0 benchmark` | Run a pinned local OOLONG or RULER S-NIAH dataset |
+| `rlm0 cost` | Estimate the worst case permitted by a configuration |
+| `rlm0 sandbox` | Verify the requested execution backend |
+| `rlm0 doctor` | Inspect providers, benchmarks, and local prerequisites without spending |
+
+The CLI downloads no benchmark data. `rlm0 benchmark --list` prints the pinned
+source and revision expected by each adapter.
+
+## Defaults
+
+| Setting | Default |
+| --- | --- |
+| Sandbox | Docker |
+| Policy | Escalate from depth 0 to depth 1 after an unsuccessful attempt |
+| Maximum depth | 1 |
+| REPL turns per attempt | 8 |
+| Attempts per run | 4 |
+| Budget | $2, 40 calls, 900 seconds |
+| Unpriced calls under a USD ceiling | Refused after the first settlement |
+
+Use `--unbounded` only when an unbounded run is intentional. The flag conflicts
+with every budget ceiling, and the run record names the choice.
+
+## Sandboxes
+
+| Backend | Intended use | Security boundary |
 | --- | --- | --- |
-| Depth-zero control and escalation | Implemented | One assembled runtime drives both attempts. |
-| Run-wide reserve, settle, and release | Implemented | Unpriced provider usage fails closed under a USD ceiling. |
-| Docker sandbox | Implemented | Network disabled; credentials remain on the host. |
-| MicroVM sandbox | Experimental | Docker plus a registered Kata-style OCI runtime; it verifies a separate guest kernel. |
-| Subprocess sandbox | Implemented, unsafe | Intended only for context you wrote yourself. |
-| Anthropic, OpenAI, Gemini clients | Implemented | Usage comes from provider responses. |
-| Evidence-aware synthetic evaluation | Implemented | Scores answer and cited evidence separately. |
-| OOLONG and RULER S-NIAH adapters | Implemented | Data must be downloaded and pinned by the caller. |
-| CoT self-consistency baseline | Implemented | Use it at matched cost in evaluation. |
-| Parallel sub-call fan-out | Implemented | `rlm_batch` reserves the whole batch, warms its prefix, and preserves result order. |
-| Cache-warming barrier and fan-out estimator | Implemented | Batch dispatch records the reservation estimate against observed use. |
-| Published benchmark result | Not available | No result has been run or released. |
+| Docker | Default for untrusted context | Container boundary with network disabled |
+| MicroVM | Experimental use on a KVM host | Separate guest kernel through a registered Docker OCI runtime |
+| Subprocess | Local development with context you wrote | None |
 
-## Safety model
+Provider credentials stay on the host. Host callbacks cross the sandbox over
+JSON messages on standard input and output, so the guest needs neither a
+network socket nor an API key.
 
-The context may be hostile text and the model writes code over it. Use Docker
-or the experimental microVM backend for material you do not control. The
-subprocess backend runs with your user, filesystem, and network access; it is
-not a security boundary.
-
-API credentials stay on the host. Sandbox messages use JSON framing, never
-pickle, and host callbacks cross standard input/output rather than a network
-socket. See [SECURITY.md](SECURITY.md) and the detailed
-[threat model](docs/THREAT_MODEL.md).
-
-The experimental microVM backend currently targets Docker with a registered OCI
-microVM runtime such as Kata. Podman and libkrun are not supported claims until
-they have dedicated discovery, launch, and live-backend tests.
+The microVM backend currently supports Docker with a registered OCI runtime
+such as Kata. The project does not claim Podman or libkrun support. See
+[SECURITY.md](SECURITY.md) and the full [threat model](docs/THREAT_MODEL.md).
 
 ## Evaluation
 
-The harness records answer correctness and evidence support separately. It
-refuses to render a comparison when rows use different corpora, samples, or
-grading policies, and it requires a depth-zero row.
+The harness grades answer correctness and evidence support separately. It
+refuses to compare runs that used different corpora, sample sets, or grading
+policies, and it will not render a result table without a depth 0 row.
 
-Before any public result, compare at least:
+A public result must include:
 
-- Direct long-context prompting.
-- Depth-zero RLM.
-- Recursive RLM.
-- CoT self-consistency at matched cost.
-- A task-appropriate nonrecursive baseline.
+- direct long-context prompting;
+- depth 0 RLM;
+- recursive RLM;
+- chain-of-thought self-consistency at matched cost;
+- a nonrecursive baseline suited to the task.
 
-The full protocol, data requirements, and negative-result policy are in
+OOLONG and RULER S-NIAH adapters are available through `rlm0 benchmark`. The
+data must be acquired separately and pinned by hash. No public result has been
+run from this repository.
+
+The complete protocol and negative-result policy are in
 [docs/EVALUATION.md](docs/EVALUATION.md).
 
-## Related work and scope
+## Project status
 
-The original RLM paper is the starting point, not the entire field. The design
-also draws on TimeRLM's evidence-grounded long-context evaluation, zigrlm's
-network-closed host callbacks and deterministic tracing, RLM_agent's state and
-budget work, Chained RLM's fresh-root handoffs, Recursive Agent Harnesses,
-RLMOpt, and lambda-RLM. These systems establish prior art for most individual
-mechanisms. [RELATED_WORK.md](docs/RELATED_WORK.md) explains the differences,
-including where their evidence is incomplete or their approach is a better fit.
+rlm0 is alpha software. The runtime, CLI, provider adapters, Docker sandbox,
+experimental microVM path, synthetic harness, and public benchmark adapters are
+implemented and tested on Python 3.11 through 3.13.
+
+The remaining work needs external systems or data: live provider measurements,
+public benchmark runs, microVM testing on KVM, and HAL integration. These items
+are tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Prior work
+
+The RLM method comes from [*Recursive Language Models*](https://arxiv.org/abs/2512.24601)
+by Alex L. Zhang, Tim Kraska, and Omar Khattab. Their
+[reference implementation](https://github.com/alexzhang13/rlm) defines the
+category and remains the general-purpose upstream project.
+
+rlm0 is a clean-room implementation. Its design also reflects work in TimeRLM,
+zigrlm, RLM_agent, Chained RLM, Recursive Agent Harnesses, RLMOpt, and
+lambda-RLM. [RELATED_WORK.md](docs/RELATED_WORK.md) records the specific prior
+art, evidence, and differences.
 
 ## License and citation
 
 Released under the [MIT License](LICENSE). If this repository informs research,
-cite the original work:
+cite the original RLM paper:
 
 ```bibtex
 @article{zhang2025recursive,
@@ -153,3 +219,5 @@ cite the original work:
   url={https://arxiv.org/abs/2512.24601}
 }
 ```
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
