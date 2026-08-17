@@ -131,6 +131,24 @@ pytest
 Python 3.11 or newer. The tests run against fakes, so you need no API key and
 no model is called to develop against it.
 
+## Quick start
+
+Install the provider extra you intend to use, then confirm the sandbox before
+giving it any context:
+
+```bash
+pip install -e ".[anthropic]"
+export ANTHROPIC_API_KEY=...
+rlm0 sandbox --require docker
+rlm0 run "Which supplier appears in both reports?" --context reports/ \
+  --provider anthropic --model claude-sonnet-5 --max-usd 0.50 --max-calls 20
+```
+
+`.[openai]` and `.[gemini]` install the other supported provider SDKs. Use
+`rlm0 eval` for the self-checking synthetic corpus, `rlm0 cost` before a run,
+and `rlm0 --help` for all options. Public benchmark adapters are API-first and
+require their pinned data on disk; see [docs/EVALUATION.md](docs/EVALUATION.md).
+
 ## What a run looks like
 
 ```text
@@ -216,8 +234,11 @@ depth-0 row beside it.
 
 ## Where it stands
 
-The contract and the seams are built and tested. The runtime, sandbox,
-providers and harness are in progress.
+The integrated runtime, Docker and subprocess backends, microVM backend,
+Anthropic/OpenAI/Gemini clients, evaluation harness, benchmark adapters, CLI,
+CI, and documentation are built and tested. There is no published model result
+yet. Running one requires a provider credential plus the pinned benchmark data,
+and any reported number must include its depth-0 control.
 
 ## Prior work
 

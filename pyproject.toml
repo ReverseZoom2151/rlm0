@@ -34,6 +34,7 @@ dependencies = []
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
+gemini = ["google-genai>=1.0"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -42,6 +43,9 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+rlm0 = "rlm0.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/ReverseZoom2151/rlm0"
 Repository = "https://github.com/ReverseZoom2151/rlm0"
@@ -49,6 +53,20 @@ Issues = "https://github.com/ReverseZoom2151/rlm0/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rlm0"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/rlm0",
+    "tests",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 88
