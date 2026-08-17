@@ -17,3 +17,6 @@
 - Added pre-dispatch permits for prompt-optimisation evaluations and stricter
   local AnomalyXL lead-lag label validation.
 - Extended the installed-wheel smoke test to research inspection commands.
+- Reworked the README around the shipped runtime, separated installation from
+  contributor setup, and added direct citations for the research modules.
+- Added `CITATION.cff` and a citation-ready bibliography for the project.

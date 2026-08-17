@@ -1,6 +1,6 @@
 <h1 align="center">rlm0</h1>
 
-<p align="center"><strong>A bounded runtime for Recursive Language Models</strong></p>
+<p align="center"><strong>A cost-bounded Recursive Language Model runtime with depth-0 controls</strong></p>
 
 <p align="center">
   <a href="https://github.com/ReverseZoom2151/rlm0/actions/workflows/ci.yml"><img src="https://github.com/ReverseZoom2151/rlm0/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -15,18 +15,19 @@
   <a href="docs/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="docs/EVALUATION.md">Evaluation</a> &bull;
   <a href="docs/RESEARCH.md">Research APIs</a> &bull;
-  <a href="docs/RELATED_WORK.md">Related work</a> &bull;
+  <a href="#research-lineage">Research lineage</a> &bull;
+  <a href="docs/CITATIONS.md">Citations</a> &bull;
   <a href="https://github.com/alexzhang13/rlm">Reference implementation</a>
 </p>
 
-rlm0 keeps long context in an isolated Python environment. A model can search,
-compute, and call submodels over selected slices without loading the full source
-into its prompt.
+rlm0 runs Recursive Language Models over long context through a sandboxed Python
+REPL. The source stays in the environment as a variable. The model writes code
+to search it, compute over it, and call submodels on selected slices.
 
-Every task starts at depth 0, with subcalls disabled. If that attempt does not
-answer, the same runtime may try depth 1. Both attempts share one budget and
-remain together in the final run record, so the cost and effect of recursion
-are visible for that task.
+The default policy starts each task at depth 0 with subcalls disabled. If that
+attempt does not answer, the same runtime may try depth 1. Both attempts use one
+budget and stay together in the final `Run`, which records what recursion cost
+and whether it helped.
 
 > [!NOTE]
 > This is a clean-room RLM implementation, not a reproduction of the paper.
@@ -34,14 +35,13 @@ are visible for that task.
 
 ## Why rlm0
 
-| Capability | What it does |
+| Capability | What rlm0 records or enforces |
 | --- | --- |
-| Depth 0 control | Runs the nonrecursive REPL loop first on every task |
-| Shared budget | Reserves, settles, and refunds calls across the entire recursion tree |
-| Isolated execution | Runs model-authored Python without placing provider keys in the sandbox |
-| Bounded fanout | Reserves each batch before dispatch, warms its cache prefix, and preserves result order |
-| Inspectable runs | Records every call with its model, role, depth, usage, cost, and wall time |
-| Evidence-aware evaluation | Scores answers and cited evidence separately, with matched sample and cost checks |
+| Paired depth control | Keeps the depth-0 attempt beside every recursive attempt in the same run |
+| Tree-wide budget | Reserves, settles, and refunds calls across the complete recursion tree |
+| Sandboxed execution | Keeps provider credentials on the host while model-authored Python runs in the selected backend |
+| Deterministic fanout | Reserves a batch before dispatch, bounds parallel work, and returns results in declared order |
+| Reproducible evaluation | Matches samples and cost, scores cited evidence, and refuses reports without depth 0 |
 
 ## How it runs
 
@@ -71,32 +71,25 @@ long context
 one run record, one budget, every call tagged by role and depth
 ```
 
-Depth 1 is the normal ceiling. Higher depths require both an experimental
-policy and the `--experimental-depth` flag.
+Depth 1 is the normal ceiling. Higher depths require an experimental policy and
+the `--experimental-depth` flag.
 
 ## Quick start
 
-Python 3.11 or newer is required.
+Python 3.11 or newer is required. rlm0 is not published on PyPI, so install it
+from a checkout. Choose the extra for the provider you plan to use.
 
 ```bash
 git clone https://github.com/ReverseZoom2151/rlm0.git
 cd rlm0
-pip install -e ".[dev]"
+pip install ".[anthropic]"  # or .[openai] / .[gemini]
+```
 
-python -m pytest
+Inspect the local setup before spending anything:
+
+```bash
 rlm0 doctor
 rlm0 benchmark --list
-```
-
-Install the SDK for the provider you intend to use:
-
-```bash
-pip install -e ".[anthropic]"  # or .[openai] / .[gemini]
-```
-
-Check the execution boundary before sending a task:
-
-```bash
 rlm0 sandbox --require docker
 ```
 
@@ -117,6 +110,13 @@ rlm0 run "Which supplier appears in both reports?" \
 The final block printed by `rlm0 run` is always the run summary. It includes
 the depth 0 attempt, the recursive attempt when one occurred, and the budget
 used by each.
+
+For development, install the test tools alongside a provider extra:
+
+```bash
+pip install -e ".[dev,anthropic]"
+python -m pytest
+```
 
 ## CLI
 
@@ -187,23 +187,43 @@ The complete protocol and negative-result policy are in
 
 ## Optional research APIs
 
-[`rlm0.research`](src/rlm0/research/) is a separate, local and API-first
-layer for controlled research experiments. It does not alter the normal
-depth-0 then depth-1 runtime or make any public benchmark result.
+[`rlm0.research`](src/rlm0/research/) is a local, API-first layer for controlled
+experiments. Importing it does not change the normal depth-0 then depth-1 policy.
 
-It provides immutable `ResearchRun` records, hash-chained JSONL replay logs
-that seal once complete, and a bounded content-addressed artifact store. Every
-trial must match its control's task and budget identity. On top of those contracts are
-conservative context screening, PEEK-style maps, SRLM candidate search,
-verifier-backed recombination, fresh-root Chained RLM handoffs, declared
-bounded agent-harness plans, and split-safe prompt optimisation with
-pre-dispatch evaluation permits.
+| API | Purpose |
+| --- | --- |
+| `contracts`, `events`, `artifacts` | Immutable research records, sealed hash-chained replay logs, and bounded content-addressed storage |
+| `screen`, `peek` | Conservative tri-state context checks and reusable context maps |
+| `srlm`, `verifier` | Nonrecursive candidate search and evidence-carrying recombination |
+| `chained` | Fresh roots connected by bounded handoffs and durable artifacts |
+| `agent_harness` | Declared agent trees with one concurrency bound across every depth |
+| `optimize` | Split-safe prompt evolution with pre-dispatch evaluation permits |
 
 The local `anomalyxl-local` adapter accepts a caller-supplied, hash-locked
-JSONL dataset for precise anomaly tasks. It is informed by TimeRLM and
-AnomalyXL task shapes; it neither downloads nor claims compatibility with the
-official dataset or scorer. See [docs/RESEARCH.md](docs/RESEARCH.md) for the
-contracts, limits, and intended use of each API.
+JSONL dataset for precise anomaly tasks. TimeRLM and AnomalyXL informed its task
+shapes. The adapter does not download the official dataset or claim scorer
+parity. [RESEARCH.md](docs/RESEARCH.md) documents each contract and limit.
+
+## Research lineage
+
+rlm0 shares no code with these projects. The papers below introduced or tested
+the methods that correspond to implemented modules.
+
+| Paper | What it informs here |
+| --- | --- |
+| [Recursive Language Models](https://arxiv.org/abs/2512.24601) | Core REPL and subcall runtime |
+| [Think, But Don't Overthink](https://arxiv.org/abs/2603.02615) | Depth-0-first policy and the experimental ceiling above depth 1 |
+| [Recursive Language Models Meet Uncertainty](https://arxiv.org/abs/2603.15653) | SRLM candidate search and the nonrecursive comparison |
+| [PEEK](https://arxiv.org/abs/2605.19932) | Reusable context maps |
+| [Chained Recursive Language Models](https://arxiv.org/abs/2608.05124) | Fresh-root handoffs, blackboards, and artifacts |
+| [Recursive Agent Harnesses](https://arxiv.org/abs/2606.13643) | Declared recursive agent trees |
+| [RLMOpt](https://arxiv.org/abs/2608.10471) | Prompt evolution and deterministic selection guards |
+| [TimeRLM](https://arxiv.org/abs/2608.03391) | Precise time-series tasks and the local AnomalyXL-style adapter |
+| [Recursive Language Models for Jailbreak Detection](https://arxiv.org/abs/2602.16520) | Conservative context screening |
+
+Full BibTeX entries are in [CITATIONS.md](docs/CITATIONS.md). The broader
+comparison, including work that argues against parts of this design, is in
+[RELATED_WORK.md](docs/RELATED_WORK.md).
 
 ## Project status
 
@@ -215,22 +235,11 @@ The remaining work needs external systems or data: live provider measurements,
 public benchmark runs, microVM testing on KVM, and HAL integration. These items
 are tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Prior work
+## Citation
 
-The RLM method comes from [*Recursive Language Models*](https://arxiv.org/abs/2512.24601)
-by Alex L. Zhang, Tim Kraska, and Omar Khattab. Their
-[reference implementation](https://github.com/alexzhang13/rlm) defines the
-category and remains the general-purpose upstream project.
-
-rlm0 is a clean-room implementation. Its design also reflects work in TimeRLM,
-zigrlm, RLM_agent, Chained RLM, Recursive Agent Harnesses, RLMOpt, and
-lambda-RLM. [RELATED_WORK.md](docs/RELATED_WORK.md) records the specific prior
-art, evidence, and differences.
-
-## License and citation
-
-Released under the [MIT License](LICENSE). If this repository informs research,
-cite the original RLM paper:
+Use [`CITATION.cff`](CITATION.cff) to cite rlm0 itself. The core runtime
+implements the method introduced by Zhang, Kraska, and Khattab, so research
+that uses it should also cite the original RLM paper:
 
 ```bibtex
 @article{zhang2025recursive,
@@ -241,5 +250,12 @@ cite the original RLM paper:
   url={https://arxiv.org/abs/2512.24601}
 }
 ```
+
+If you use an optional research module, add the corresponding paper from
+[CITATIONS.md](docs/CITATIONS.md).
+
+## License
+
+rlm0 is released under the [MIT License](LICENSE).
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
