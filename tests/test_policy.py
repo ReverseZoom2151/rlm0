@@ -44,7 +44,7 @@ def ctx(
 
 
 def test_all_policies_satisfy_the_seam() -> None:
-    for policy in (Never(), Fixed(2), Escalating()):
+    for policy in (Never(), Fixed(2, experimental=True), Escalating()):
         assert isinstance(policy, DepthPolicy)
         assert policy.describe().strip()
 
@@ -59,7 +59,7 @@ class TestNever:
 
 class TestFixed:
     def test_escalates_once_to_its_bound(self) -> None:
-        assert Fixed(2).next_depth(ctx()) == 2
+        assert Fixed(2, experimental=True).next_depth(ctx()) == 2
 
     def test_escalates_even_when_depth_zero_answered(self) -> None:
         # The ablation case: the deeper row is wanted on every task, including
@@ -67,11 +67,11 @@ class TestFixed:
         assert Fixed(1).next_depth(ctx(outcome=Outcome.ANSWERED)) == 1
 
     def test_stops_after_one_deeper_attempt(self) -> None:
-        assert Fixed(2).next_depth(ctx(attempts=2)) is None
+        assert Fixed(2, experimental=True).next_depth(ctx(attempts=2)) is None
 
     def test_refuses_when_the_budget_cannot_fund_the_attempt(self) -> None:
-        assert Fixed(2).next_depth(ctx(reservation=BROKE)) is None
-        assert Fixed(2).next_depth(ctx(reservation=NEARLY_BROKE)) is None
+        assert Fixed(2, experimental=True).next_depth(ctx(reservation=BROKE)) is None
+    assert Fixed(2, experimental=True).next_depth(ctx(reservation=NEARLY_BROKE)) is None
 
     def test_depth_zero_is_not_a_fixed_depth(self) -> None:
         with pytest.raises(ValueError, match="use Never"):
@@ -86,13 +86,13 @@ class TestEscalating:
         assert Escalating().next_depth(ctx()) == 1
 
     def test_climbs_one_rung_per_failed_attempt(self) -> None:
-        policy = Escalating(max_depth=3)
+        policy = Escalating(max_depth=3, experimental=True)
         assert policy.next_depth(ctx(attempts=2)) == 2
         assert policy.next_depth(ctx(attempts=3)) == 3
         assert policy.next_depth(ctx(attempts=4)) is None
 
     def test_respects_a_larger_step(self) -> None:
-        assert Escalating(max_depth=4, step=2).next_depth(ctx()) == 2
+        assert Escalating(max_depth=4, step=2, experimental=True).next_depth(ctx()) == 2
 
     def test_stops_at_its_ceiling(self) -> None:
         assert Escalating(max_depth=0).next_depth(ctx()) is None

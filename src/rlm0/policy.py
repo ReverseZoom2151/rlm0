@@ -101,6 +101,7 @@ class Fixed:
 
     depth: int
     min_calls_for_deeper: int = 2
+    experimental: bool = False
 
     def __post_init__(self) -> None:
         if self.depth < 1:
@@ -110,6 +111,11 @@ class Fixed:
             raise ValueError("Fixed depth must be at least 1; use Never for depth zero")
         if self.min_calls_for_deeper < 1:
             raise ValueError("min_calls_for_deeper must be at least 1")
+        if self.depth > 1 and not self.experimental:
+            raise ValueError(
+                "depth above 1 is experimental; pass experimental=True to "
+                "make that choice explicit"
+            )
 
     def next_depth(self, context: EscalationContext) -> int | None:
         if context.attempts_so_far != 1:
@@ -139,10 +145,11 @@ class Escalating:
     reliably converts one failure into a more expensive one.
     """
 
-    max_depth: int = 2
+    max_depth: int = 1
     step: int = 1
     min_calls_for_deeper: int = 2
     stop_on_error: bool = True
+    experimental: bool = False
 
     def __post_init__(self) -> None:
         if self.max_depth < 0:
@@ -151,17 +158,27 @@ class Escalating:
             raise ValueError("step must be at least 1, or the ladder never climbs")
         if self.min_calls_for_deeper < 1:
             raise ValueError("min_calls_for_deeper must be at least 1")
+        if self.max_depth > 1 and not self.experimental:
+            raise ValueError(
+                "max_depth above 1 is experimental; pass experimental=True "
+                "to make that choice explicit"
+            )
 
     def next_depth(self, context: EscalationContext) -> int | None:
         if context.last_outcome == Outcome.ANSWERED:
             return None
         if self.stop_on_error and context.last_outcome == Outcome.ERRORED:
             return None
-        # The runtime always opens at depth zero, so the number of attempts
-        # closed so far is also the rung of the ladder to climb to next. The
-        # policy owns the ladder rather than reading the last bound back out
-        # of the context, which keeps the two from disagreeing.
-        candidate = context.attempts_so_far * self.step
+        # The previous bound is carried by the run, not reconstructed from an
+        # attempt count. A resumed or fixed-policy run need not have attempt n
+        # at bound n, and silently assuming it does is how a policy skips a
+        # rung or repeats one.
+        previous = context.last_max_depth
+        candidate = (
+            previous + self.step
+            if previous is not None
+            else context.attempts_so_far * self.step
+        )
         if candidate > self.max_depth:
             return None
         if not can_fund_another_attempt(
