@@ -90,6 +90,27 @@ class FakeSandbox:
 
     def execute(self, code: str, *, timeout_s: float) -> ExecResult:
         self.executed.append(code)
+        if code.startswith("BATCH:"):
+            handler = self.handlers.get("rlm_batch")
+            if handler is None:
+                return ExecResult(
+                    stdout="",
+                    stderr="NameError: name 'rlm_batch' is not defined",
+                    wall_clock_s=0.01,
+                    ok=False,
+                    variables=tuple(self.variables),
+                )
+            pairs = [
+                tuple(item.partition("|")) for item in code[len("BATCH:") :].split(";")
+            ]
+            request = [[query, handle] for query, _, handle in pairs]
+            return ExecResult(
+                stdout=repr(handler(request)),
+                stderr="",
+                wall_clock_s=0.01,
+                ok=True,
+                variables=tuple(self.variables),
+            )
         if code.startswith("SUB:"):
             query, _, handle = code[4:].partition("|")
             handler = self.handlers.get("rlm_call")
@@ -319,6 +340,7 @@ def build(
     policy: DepthPolicy | None = None,
     calls_allowed: int = 20,
     max_iterations: int = 2,
+    experimental_depth: bool = False,
     make_box: Callable[[], FakeSandbox] = FakeSandbox,
 ) -> Harness:
     lm = FakeLM(responder=responder)
@@ -343,6 +365,7 @@ def build(
         model="fake-model",
         policy=policy if policy is not None else Escalating(),
         max_iterations=max_iterations,
+        experimental_depth=experimental_depth,
     )
     return Harness(rlm, lm, budget, prompter, parser, observer, sandboxes)
 
@@ -528,7 +551,8 @@ def test_recursion_reaches_depth_two_when_the_bound_allows_it() -> None:
                 "child work": ["CODE: SUB:grandchild work|CONTEXT", "FINAL: child"],
             },
         ),
-        policy=Fixed(2),
+        policy=Fixed(2, experimental=True),
+        experimental_depth=True,
     )
     run = harness.rlm.complete("ROOT question", context="corpus")
 
@@ -539,6 +563,28 @@ def test_recursion_reaches_depth_two_when_the_bound_allows_it() -> None:
     assert deep.n_sub_calls == 3
     assert all(c.role is Role.SUB for c in deep.calls if c.depth > 0)
     assert deep.answer == "done"
+
+
+def test_batch_subcalls_reserve_before_workers_start_and_keep_result_order() -> None:
+    harness = build(
+        scripted(
+            {"ROOT": ["FINAL: shallow"]},
+            {
+                "ROOT": ["CODE: BATCH:first|CONTEXT;second|CONTEXT", "FINAL: done"],
+                "first": ["FINAL: one"],
+                "second": ["FINAL: two"],
+            },
+        ),
+        policy=Fixed(1),
+    )
+    run = harness.rlm.complete("ROOT question", context="corpus")
+
+    assert run.answer == "done"
+    # The root turns reserve two calls; the batch's two children reserve their
+    # first turns plus one salvage hold each as one atomic four-call request.
+    assert 4 in harness.budget.reservations
+    assert run.attempts[1].n_sub_calls == 2
+    assert harness.rlm.estimator.over_reservation_ratio is not None
 
 
 def test_a_sandbox_that_cannot_service_sub_calls_refuses_loudly() -> None:
@@ -664,7 +710,8 @@ def test_a_model_that_says_nothing_useful_is_nudged_rather_than_crashed() -> Non
 def test_attempts_are_appended_in_ascending_depth_order() -> None:
     harness = build(
         scripted({"ROOT": ["CODE: NOOP"]}, {"ROOT": ["CODE: NOOP"]}),
-        policy=Escalating(max_depth=3),
+        policy=Escalating(max_depth=3, experimental=True),
+        experimental_depth=True,
         calls_allowed=100,
     )
     run = harness.rlm.complete("ROOT question")

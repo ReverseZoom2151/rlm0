@@ -49,6 +49,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Protocol, cast, runtime_checkable
 
@@ -329,24 +330,29 @@ class _HeldCall:
     def __init__(self, release: Callable[[int], None]) -> None:
         self._release = release
         self._held = 0
+        self._lock = threading.Lock()
 
     @property
     def held(self) -> int:
-        return self._held
+        with self._lock:
+            return self._held
 
     def add(self, n: int) -> None:
-        self._held += n
+        with self._lock:
+            self._held += n
 
     def consume(self, n: int = 1) -> bool:
         """Spend a held call. False when there was nothing held to spend."""
-        if self._held < n:
-            return False
-        self._held -= n
-        return True
+        with self._lock:
+            if self._held < n:
+                return False
+            self._held -= n
+            return True
 
     def give_back(self) -> None:
-        if self._held:
+        with self._lock:
             n, self._held = self._held, 0
+        if n:
             self._release(n)
 
 
@@ -377,9 +383,11 @@ class RLM:
         attempt_timeout_s: float | None = None,
         context_variable: str = "CONTEXT",
         sub_call_name: str = "rlm_call",
+        batch_sub_call_name: str = "rlm_batch",
         max_parallel_sub_calls: int = 4,
         warm_timeout_s: float = 120.0,
         estimator: FanOutEstimator | None = None,
+        experimental_depth: bool = False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_iterations < 1:
@@ -390,6 +398,16 @@ class RLM:
             raise ValueError("max_parallel_sub_calls must be at least 1")
         if warm_timeout_s <= 0.0:
             raise ValueError("warm_timeout_s must be positive")
+        declared_depth = getattr(policy, "max_depth", getattr(policy, "depth", 1))
+        if (
+            isinstance(declared_depth, int)
+            and declared_depth > 1
+            and not experimental_depth
+        ):
+            raise ValueError(
+                "depth above 1 is experimental; pass experimental_depth=True "
+                "to the runtime after selecting an experimental policy"
+            )
         self._lm = lm
         self._sandbox_factory = sandbox_factory
         self._budget = budget
@@ -406,9 +424,11 @@ class RLM:
         self._attempt_timeout_s = attempt_timeout_s
         self._context_variable = context_variable
         self._sub_call_name = sub_call_name
+        self._batch_sub_call_name = batch_sub_call_name
         self._max_parallel_sub_calls = max_parallel_sub_calls
         self._warm_timeout_s = warm_timeout_s
         self._estimator = estimator if estimator is not None else FanOutEstimator()
+        self._experimental_depth = experimental_depth
         self._clock = clock
 
     @property
@@ -489,6 +509,11 @@ class RLM:
         )
         if proposal is None or proposal <= last.max_depth:
             return None
+        if proposal > 1 and not self._experimental_depth:
+            raise ValueError(
+                "the depth policy proposed depth above 1 without "
+                "experimental_depth=True"
+            )
         return proposal
 
     def _probe_budget(self) -> CallReservation:
@@ -569,6 +594,7 @@ class RLM:
         deadline: float | None,
         state: _AttemptState,
         dispatch: _Dispatch | None = None,
+        initial_hold: _HeldCall | None = None,
     ) -> _Closed:
         """Run one REPL to a stop. The only function in this file that does.
 
@@ -612,6 +638,8 @@ class RLM:
                 depth=depth,
                 deadline=deadline,
                 state=state,
+                dispatch=dispatch,
+                initial_hold=initial_hold,
             )
         except RecursionUnavailableError:
             raise
@@ -630,6 +658,8 @@ class RLM:
         depth: int,
         deadline: float | None,
         state: _AttemptState,
+        dispatch: _Dispatch | None = None,
+        initial_hold: _HeldCall | None = None,
     ) -> _Closed:
         for _ in range(self._max_iterations):
             if deadline is not None and self._clock() >= deadline:
@@ -641,29 +671,49 @@ class RLM:
             # call to a working turn leaves nothing to ask for a final answer
             # with, which is how budget exhaustion becomes an empty result
             # instead of a shorter one.
-            reservation = self._budget.reserve(
-                n_calls=2, estimated_tokens=_estimate_tokens(system, messages)
-            )
-            if not reservation.granted:
-                return self._wind_down(
-                    system=system,
-                    messages=messages,
-                    depth=depth,
-                    refusal=reservation,
-                    state=state,
+            held_turn = initial_hold is not None and initial_hold.consume(2)
+            if not held_turn:
+                reservation = self._budget.reserve(
+                    n_calls=2, estimated_tokens=_estimate_tokens(system, messages)
                 )
-            state.iterations += 1
+                if not reservation.granted:
+                    return self._wind_down(
+                        system=system,
+                        messages=messages,
+                        depth=depth,
+                        refusal=reservation,
+                        state=state,
+                    )
+                if reservation.reason:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Budget advisory: " + reservation.reason + "\n"
+                                "Reduce fan-out, keep only evidence needed for "
+                                "the answer, and prepare a final result."
+                            ),
+                        }
+                    )
+            state.note_iteration()
             text = self._call_model(
                 system=system,
                 messages=messages,
                 depth=depth,
                 state=state,
                 release_after=1,
+                dispatch=dispatch,
             )
             parsed = self._parser.parse(text)
             answer = parsed.final_answer
             if answer is not None:
-                return _Closed(Outcome.ANSWERED, answer)
+                source = getattr(parsed, "completion_source", None)
+                detail = (
+                    "completion protocol: " + str(source)
+                    if source is not None
+                    else "completion recovered by parser adapter"
+                )
+                return _Closed(Outcome.ANSWERED, answer, detail)
             messages.append({"role": "assistant", "content": text})
             code = parsed.code
             if code is None:
@@ -673,7 +723,7 @@ class RLM:
                 continue
             result = sandbox.execute(code, timeout_s=self._exec_timeout_s)
             if not result.ok:
-                state.exec_failures += 1
+                state.note_exec_failure()
             messages.append({"role": "user", "content": self._observer.format(result)})
         return _Closed(
             Outcome.ITERATIONS_EXHAUSTED,
@@ -689,6 +739,7 @@ class RLM:
         depth: int,
         refusal: CallReservation,
         state: _AttemptState,
+        outcome: Outcome = Outcome.BUDGET_EXHAUSTED,
     ) -> _Closed:
         """Spend the held-back call telling the model to stop and summarise.
 
@@ -703,7 +754,7 @@ class RLM:
         final = self._budget.reserve(n_calls=1, estimated_tokens=256)
         if not final.granted:
             return _Closed(
-                Outcome.BUDGET_EXHAUSTED,
+                outcome,
                 None,
                 f"budget refused even the wind-down call: {final.reason}",
             )
@@ -721,9 +772,9 @@ class RLM:
         parsed = self._parser.parse(text)
         partial = parsed.final_answer if parsed.final_answer is not None else text
         return _Closed(
-            Outcome.BUDGET_EXHAUSTED,
+            outcome,
             None,
-            f"budget exhausted; partial reply not counted as an answer: {partial}",
+            f"{outcome.value}; partial reply not counted as an answer: {partial}",
         )
 
     def _call_model(
@@ -734,6 +785,7 @@ class RLM:
         depth: int,
         state: _AttemptState,
         release_after: int = 0,
+        dispatch: _Dispatch | None = None,
     ) -> str:
         """One completion, settled against the budget and attributed to a depth.
 
@@ -741,14 +793,26 @@ class RLM:
         bill a run without appearing in its cost table.
         """
         role = Role.ROOT if depth == 0 else Role.SUB
-        response = self._lm.complete(
-            system=system,
-            messages=messages,
-            model=self._model if depth == 0 else self._sub_model,
-            max_tokens=self._max_tokens,
-            cache_prefix=True,
-        )
+        leader = dispatch.before_call() if dispatch is not None else False
+        try:
+            response = self._lm.complete(
+                system=system,
+                messages=messages,
+                model=self._model if depth == 0 else self._sub_model,
+                max_tokens=self._max_tokens,
+                cache_prefix=True,
+            )
+        except Exception:
+            if leader and dispatch is not None:
+                dispatch.after_call(leader=True, tokens=0)
+            raise
+        if dispatch is not None:
+            dispatch.after_call(leader=leader, tokens=response.usage.total)
         self._budget.settle(response.usage, response.cost_usd)
+        prompt_chars = len(system) + sum(
+            len(item.get("content", "")) for item in messages
+        )
+        self._estimator.observe(prompt_chars=prompt_chars, usage=response.usage)
         self._release(release_after)
         state.calls.append(
             CallRecord(
@@ -782,6 +846,7 @@ class RLM:
         single test failing.
         """
         sandbox.register_host_call(self._sub_call_name, 2)
+        sandbox.register_host_call(self._batch_sub_call_name, -1)
         if not isinstance(sandbox, SubCallSandbox):
             raise RecursionUnavailableError(
                 f"attempt bounded at depth {max_depth} needs sub-calls, but "
@@ -800,7 +865,18 @@ class RLM:
                 state=state,
             )
 
+        def batch_handler(*args: object) -> list[str]:
+            return self._service_sub_batch(
+                parent=sandbox,
+                args=args,
+                depth=depth,
+                max_depth=max_depth,
+                deadline=deadline,
+                state=state,
+            )
+
         sandbox.set_host_call_handler(self._sub_call_name, handler)
+        sandbox.set_host_call_handler(self._batch_sub_call_name, batch_handler)
 
     def _service_sub_call(
         self,
@@ -846,6 +922,96 @@ class RLM:
             return f"<sub-call did not answer: {closed.outcome.value}>"
         return closed.answer
 
+    def _service_sub_batch(
+        self,
+        *,
+        parent: Sandbox,
+        args: Sequence[object],
+        depth: int,
+        max_depth: int,
+        deadline: float | None,
+        state: _AttemptState,
+    ) -> list[str]:
+        """Run a bounded, warmed batch of child RLMs.
+
+        The guest calls ``llm_batch([[query, handle], ...])``. All child first
+        turns and their wind-down holds are reserved before any worker starts.
+        That is intentionally stricter than allowing a worker to reserve as it
+        begins: a partial batch has already broken the decomposition chosen in
+        guest code. Each child then keeps its ordinary per-turn budget path.
+        """
+        pairs = _batch_pairs(args)
+        if not pairs:
+            return []
+        child_depth = depth + 1
+        if child_depth > max_depth:
+            state.note_sub_calls_refused(len(pairs))
+            return [f"<sub-call refused: depth bound {max_depth} reached>"] * len(pairs)
+        if deadline is not None and self._clock() >= deadline:
+            state.note_sub_calls_refused(len(pairs))
+            return ["<sub-call refused: attempt deadline passed>"] * len(pairs)
+
+        payloads = [parent.get_variable(handle) or "" for _, handle in pairs]
+        shared_chars = len(self._prompter.system(
+            max_depth=max_depth, sub_call_name=self._sub_call_name
+        ))
+        estimate = self._estimator.estimate(
+            batch_size=len(pairs),
+            shared_prefix_chars=shared_chars,
+            slice_chars=[len(payload) for payload in payloads],
+            max_output_tokens=self._max_tokens,
+        )
+        # Two calls per child: its first actual turn and the wind-down reserve
+        # held so an exhausted child can still give a partial result.
+        reservation = self._budget.reserve(
+            n_calls=2 * len(pairs), estimated_tokens=estimate.tokens
+        )
+        if not reservation.granted:
+            state.note_sub_calls_refused(len(pairs))
+            return [f"<sub-call refused: {reservation.reason}>"] * len(pairs)
+
+        held = _HeldCall(self._release)
+        held.add(2 * len(pairs))
+        barrier = _WarmingBarrier(timeout_s=self._warm_timeout_s)
+        meter = _BatchMeter()
+
+        def work(index: int) -> tuple[int, str]:
+            query, _ = pairs[index]
+            child = self._sandbox_factory()
+            try:
+                closed = self._drive(
+                    sandbox=child,
+                    task=query,
+                    payload=payloads[index],
+                    depth=child_depth,
+                    max_depth=max_depth,
+                    deadline=deadline,
+                    state=state,
+                    dispatch=_Dispatch(barrier, meter),
+                    initial_hold=held,
+                )
+            finally:
+                child.close()
+            answer = closed.answer
+            if answer is None:
+                answer = f"<sub-call did not answer: {closed.outcome.value}>"
+            return index, answer
+
+        results = [""] * len(pairs)
+        try:
+            with ThreadPoolExecutor(
+                max_workers=min(self._max_parallel_sub_calls, len(pairs))
+            ) as pool:
+                for index, answer in pool.map(work, range(len(pairs))):
+                    results[index] = answer
+        finally:
+            barrier.open()
+            held.give_back()
+            self._estimator.record_batch(
+                reserved_tokens=estimate.tokens, actual_tokens=meter.tokens
+            )
+        return results
+
 
 def _estimate_tokens(system: str, messages: Sequence[dict[str, str]]) -> int:
     """A rough size for the reservation, and only for the reservation.
@@ -857,6 +1023,37 @@ def _estimate_tokens(system: str, messages: Sequence[dict[str, str]]) -> int:
     """
     chars = len(system) + sum(len(m.get("content", "")) for m in messages)
     return chars // 4
+
+
+def _batch_pairs(args: Sequence[object]) -> list[tuple[str, str]]:
+    """Normalize the one public batch shape without guessing at malformed work.
+
+    The guest-side API is ``llm_batch([[query, handle], ...])``. A flat series
+    of query/handle arguments remains accepted for hand-written sandbox calls,
+    but odd lengths and non-string values are refused to the guest explicitly
+    rather than being coerced into an empty query or handle.
+    """
+    raw: Sequence[object]
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        raw = args[0]
+        pairs: list[tuple[str, str]] = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                return []
+            query, handle = item
+            if not isinstance(query, str) or not isinstance(handle, str):
+                return []
+            pairs.append((query, handle))
+        return pairs
+    if len(args) % 2:
+        return []
+    pairs = []
+    for index in range(0, len(args), 2):
+        query, handle = args[index], args[index + 1]
+        if not isinstance(query, str) or not isinstance(handle, str):
+            return []
+        pairs.append((query, handle))
+    return pairs
 
 
 def _total_cost(attempts: Sequence[Attempt]) -> float | None:
